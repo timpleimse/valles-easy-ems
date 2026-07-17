@@ -246,7 +246,14 @@ function ensureLocal(){
   try{ const raw = localStorage.getItem(LS_KEY); LOCAL = raw ? JSON.parse(raw) : {}; }
   catch(e){ LOCAL = {}; }
   if(!LOCAL.compliance) LOCAL.compliance = {};
+  if(!LOCAL.tombstones) LOCAL.tombstones = {};
   return LOCAL;
+}
+function recordTombstone(kind, id){
+  ensureLocal();
+  if(!LOCAL.tombstones[kind]) LOCAL.tombstones[kind] = {};
+  LOCAL.tombstones[kind][id] = new Date().toISOString();
+  try{ localStorage.setItem(LS_KEY, JSON.stringify(LOCAL)); }catch(e){}
 }
 async function getJSON(key, def){
   ensureLocal();
@@ -268,8 +275,9 @@ async function setJSON(key, value){
   return true;
 }
 function buildPayload(){
+  ensureLocal();
   return { app:'Valles EASY EMS', version:2, savedAt:new Date().toISOString(),
-    org:ORG, employees:EMPLOYEES, payslips:PAYSLIPS, compliance:COMPLIANCE };
+    org:ORG, employees:EMPLOYEES, payslips:PAYSLIPS, compliance:COMPLIANCE, tombstones:LOCAL.tombstones };
 }
 
 /* ============================= STATE ============================= */
@@ -285,12 +293,25 @@ const DEFAULT_ORG = {
   ptSlabs: [ {min:0, max:15000, amount:0}, {min:15001, max:20000, amount:150}, {min:20001, max:1000000000, amount:200} ],
   applyPfCeiling: false, pfCeiling: 15000,
   adminPasswordHash: "", employeeSeq: 1,
-  gdrive: { clientId:'', connected:false, folderId:null, fileId:null, backupsFolderId:null, sheetId:null, lastSynced:null, email:'' }
+  gdrive: { clientId:'870827159813-4g2i299mv9qduqpmju40mpr5f63uvgns.apps.googleusercontent.com', connected:false, folderId:null, fileId:null, backupsFolderId:null, sheetId:null, lastSynced:null, email:'' }
 };
 
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,8); }
 function money(n){ n = Number(n)||0; return "₹" + n.toLocaleString('en-IN', {maximumFractionDigits:0}); }
 function money2(n){ n = Number(n)||0; return "₹" + n.toLocaleString('en-IN', {maximumFractionDigits:2}); }
+function timeAgo(iso){
+  const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime())/1000));
+  if(s < 60) return 'just now';
+  if(s < 3600) return Math.round(s/60)+'m ago';
+  if(s < 86400) return Math.round(s/3600)+'h ago';
+  return Math.round(s/86400)+'d ago';
+}
+function lastActivity(){
+  let best = null;
+  EMPLOYEES.forEach(e=>{ if(e._updatedAt && (!best || e._updatedAt > best.at)) best = { at:e._updatedAt, by:e._updatedBy||'Unknown' }; });
+  PAYSLIPS.forEach(p=>{ if(p._updatedAt && (!best || p._updatedAt > best.at)) best = { at:p._updatedAt, by:p._updatedBy||'Unknown' }; });
+  return best;
+}
 function esc(s){ return (s==null?'':String(s)).replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 
 /* Indian numbering system — rupees in words (lakh/crore), used on the payslip */
@@ -367,9 +388,24 @@ async function loadAll(){
   refreshBrand();
 }
 async function saveOrg(){ await setJSON('org-profile', ORG); }
-async function saveEmployees(){ await setJSON('employees', EMPLOYEES); }
-async function savePayslips(){ await setJSON('payslips', PAYSLIPS); }
-async function saveCompliance(empId){ await setJSON('compliance:'+empId, COMPLIANCE[empId]||[]); }
+async function saveEmployees(){
+  const remote = await pullRemotePayload();
+  EMPLOYEES = mergeCollection('employees', EMPLOYEES, remote && remote.employees, remote && remote.tombstones && remote.tombstones.employees);
+  await setJSON('employees', EMPLOYEES);
+}
+async function savePayslips(){
+  const remote = await pullRemotePayload();
+  PAYSLIPS = mergeCollection('payslips', PAYSLIPS, remote && remote.payslips, remote && remote.tombstones && remote.tombstones.payslips);
+  await setJSON('payslips', PAYSLIPS);
+}
+async function saveCompliance(empId){
+  const remote = await pullRemotePayload();
+  const tombKind = 'compliance:'+empId;
+  const remoteArr = remote && remote.compliance ? remote.compliance[empId] : null;
+  const remoteTomb = remote && remote.tombstones ? remote.tombstones[tombKind] : null;
+  COMPLIANCE[empId] = mergeCollection(tombKind, COMPLIANCE[empId]||[], remoteArr, remoteTomb);
+  await setJSON('compliance:'+empId, COMPLIANCE[empId]||[]);
+}
 async function loadCompliance(empId){
   if(COMPLIANCE[empId]) return COMPLIANCE[empId];
   const arr = await getJSON('compliance:'+empId, []);
@@ -441,8 +477,10 @@ function renderDashboard(c, actions){
   let docsCount = 0; Object.values(COMPLIANCE).forEach(arr=> arr.forEach(r=> docsCount += (r.files||[]).length));
   const netThisMonth = PAYSLIPS.filter(p=>p.period===thisMonth).reduce((s,p)=>s+p.netPay,0);
   const oldRegimeCount = EMPLOYEES.filter(e=> currentSalary(e) && currentSalary(e).taxRegime==='old').length;
+  const lastEdit = lastActivity();
 
   c.innerHTML = `
+    ${lastEdit ? `<div class="hint" style="margin-bottom:14px;">Last change: <b>${esc(lastEdit.by)}</b> · ${esc(timeAgo(lastEdit.at))} ${driveConnected()?' · Google Drive connected, syncing every 20s':''}</div>` : ''}
     <div class="stat-row">
       <div class="stat" style="background:var(--g-blue);"><div class="n">${totalEmp}</div><div class="l"><span class="ic">👥</span>Active Employees</div></div>
       <div class="stat" style="background:var(--g-orange);"><div class="n">${payslipsThisMonth}</div><div class="l"><span class="ic">🧾</span>Payslips this month</div></div>
@@ -523,6 +561,7 @@ function blankEmployee(){
 function openEmployeeForm(empId){
   const isEdit = !!empId;
   const e = isEdit ? EMPLOYEES.find(x=>x.id===empId) : blankEmployee();
+  const baseRev = Number(e._rev)||0;
   openModal(`
     <div class="modal-head"><h3>${isEdit?'Edit Employee':'Add Employee'}</h3><button class="modal-close" id="mClose">✕</button></div>
     <form id="empForm">
@@ -578,6 +617,19 @@ function openEmployeeForm(empId){
   if(!isEdit) wireRegimeToggle(document.getElementById('empForm'));
   document.getElementById('empForm').onsubmit = async (ev)=>{
     ev.preventDefault();
+    if(isEdit){
+      const conflict = await checkRecordConflict('employees', e.id, baseRev);
+      if(conflict){
+        conflictWarning(conflict._updatedBy, conflict._updatedAt,
+          ()=>{ const idx = EMPLOYEES.findIndex(x=>x.id===e.id); if(idx>-1) EMPLOYEES[idx]=conflict; openEmployeeForm(empId); },
+          ()=> submitEmployeeForm(ev, isEdit, e));
+        return;
+      }
+    }
+    await submitEmployeeForm(ev, isEdit, e);
+  };
+}
+async function submitEmployeeForm(ev, isEdit, e){
     const fd = new FormData(ev.target);
     const updated = {
       id: e.id, empCode: fd.get('empCode').trim(), name: fd.get('name').trim(),
@@ -590,6 +642,8 @@ function openEmployeeForm(empId){
       bankName: fd.get('bankName').trim(), bankAccNo: fd.get('bankAccNo').trim(), ifsc: fd.get('ifsc').trim().toUpperCase(),
       salaryHistory: e.salaryHistory
     };
+    if(isEdit) updated._rev = e._rev;
+    tagRecord(updated, !isEdit);
     if(isEdit){
       const idx = EMPLOYEES.findIndex(x=>x.id===e.id); EMPLOYEES[idx] = updated;
     } else {
@@ -603,7 +657,6 @@ function openEmployeeForm(empId){
     }
     await saveEmployees();
     closeModal(); toast(isEdit?'Employee updated.':'Employee added.'); render();
-  };
 }
 
 function salaryFieldsHtml(s){
@@ -660,7 +713,7 @@ function deleteEmployee(empId){
   `);
   document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
   document.getElementById('confirmDel').onclick = async ()=>{
-    EMPLOYEES = EMPLOYEES.filter(x=>x.id!==empId); await saveEmployees();
+    EMPLOYEES = EMPLOYEES.filter(x=>x.id!==empId); recordTombstone('employees', empId); await saveEmployees();
     await sDel('compliance:'+empId); delete COMPLIANCE[empId];
     closeModal(); toast('Employee deleted.'); render();
   };
@@ -713,6 +766,7 @@ function openReviseSalary(empId){
   const e = EMPLOYEES.find(x=>x.id===empId); if(!e) return;
   const s = currentSalary(e);
   const nextMonth = new Date().toISOString().slice(0,7);
+  const baseRev = Number(e._rev)||0;
   openModal(`
     <div class="modal-head"><h3>Revise Salary — ${esc(e.name)}</h3><button class="modal-close" id="mClose">✕</button></div>
     <form id="reviseForm">
@@ -733,13 +787,25 @@ function openReviseSalary(empId){
   wireRegimeToggle(document.getElementById('reviseForm'));
   document.getElementById('reviseForm').onsubmit = async (ev)=>{
     ev.preventDefault();
+    const conflict = await checkRecordConflict('employees', empId, baseRev);
+    if(conflict){
+      conflictWarning(conflict._updatedBy, conflict._updatedAt,
+        ()=>{ const idx = EMPLOYEES.findIndex(x=>x.id===empId); if(idx>-1) EMPLOYEES[idx]=conflict; openReviseSalary(empId); },
+        ()=> submitReviseSalary(ev, empId));
+      return;
+    }
+    await submitReviseSalary(ev, empId);
+  };
+}
+async function submitReviseSalary(ev, empId){
+    const e = EMPLOYEES.find(x=>x.id===empId); if(!e) return;
     const fd = new FormData(ev.target);
     const entry = { id: uid(), effectiveFrom: fd.get('effectiveFrom'), reason: fd.get('reason').trim(), revisedAt: new Date().toISOString(), ...readSalaryFields(fd) };
     e.salaryHistory.push(entry);
+    tagRecord(e, false);
     await saveEmployees();
     closeModal(); toast('Salary revision recorded.');
     render();
-  };
 }
 
 /* ============================= TAX / STATUTORY ENGINE ============================= */
@@ -838,6 +904,7 @@ function renderPayslips(c, actions){
 /* ---- Edit a generated payslip (corrections) ---- */
 function openEditPayslip(payslipId){
   const p = PAYSLIPS.find(x=>x.id===payslipId); if(!p) return;
+  const baseRev = Number(p._rev)||0;
   const f = (label, key, val)=>`<div class="field"><label>${label}</label><input type="number" step="0.01" min="0" data-pf="${key}" value="${Number(val)||0}"></div>`;
   openModal(`
     <div class="modal-head"><h3>Edit Payslip — ${esc(p.empName)} (${esc(p.period)})</h3><button class="modal-close" id="mClose">✕</button></div>
@@ -872,14 +939,24 @@ function openEditPayslip(payslipId){
   inputs().forEach(i=> i.addEventListener('input', recalc));
   recalc();
   document.getElementById('saveSlipEdit').onclick = async ()=>{
-    const v = vals();
+    const conflict = await checkRecordConflict('payslips', payslipId, baseRev);
+    if(conflict){
+      conflictWarning(conflict._updatedBy, conflict._updatedAt,
+        ()=>{ const idx = PAYSLIPS.findIndex(x=>x.id===payslipId); if(idx>-1) PAYSLIPS[idx]=conflict; openEditPayslip(payslipId); },
+        ()=> submitPayslipEdit(payslipId, vals()));
+      return;
+    }
+    await submitPayslipEdit(payslipId, vals());
+  };
+}
+async function submitPayslipEdit(payslipId, v){
+    const p = PAYSLIPS.find(x=>x.id===payslipId); if(!p) return;
     Object.assign(p, v);
     p.gross = v.basic + v.hra + v.childrenEducation + v.otherAllowance + v.lta;
     p.totalDeductions = v.pfEmployee + v.esi + v.pt + v.tds;
     p.netPay = p.gross - p.totalDeductions;
-    p.editedAt = new Date().toISOString();
+    tagRecord(p, false);
     await savePayslips(); closeModal(); toast('Payslip updated.'); render();
-  };
 }
 
 function deletePayslip(payslipId){
@@ -891,7 +968,7 @@ function deletePayslip(payslipId){
   `);
   document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
   document.getElementById('confirmDelSlip').onclick = async ()=>{
-    PAYSLIPS = PAYSLIPS.filter(x=>x.id!==payslipId);
+    PAYSLIPS = PAYSLIPS.filter(x=>x.id!==payslipId); recordTombstone('payslips', payslipId);
     await savePayslips(); closeModal(); toast('Payslip deleted.'); render();
   };
 }
@@ -941,6 +1018,7 @@ function openGeneratePayslip(){
       taxRegime:r.salarySnapshot.taxRegime, taxableAnnual:r.taxableAnnual,
       generatedAt: new Date().toISOString()
     };
+    tagRecord(record, true);
     PAYSLIPS.push(record); await savePayslips();
     closeModal(); toast('Payslip generated.'); openPayslipView(record.id);
   };
@@ -1110,6 +1188,7 @@ function openComplianceForm(){
     ev.preventDefault();
     const fd = new FormData(ev.target); const empId = fd.get('empId');
     const rec = { id: uid(), type: fd.get('type'), period: fd.get('period').trim(), date: fd.get('date'), refNo: fd.get('refNo').trim(), amount: Number(fd.get('amount'))||0, remarks: fd.get('remarks').trim(), files: pendingFiles };
+    tagRecord(rec, true);
     await loadCompliance(empId); COMPLIANCE[empId] = COMPLIANCE[empId]||[]; COMPLIANCE[empId].push(rec);
     const ok = await saveCompliance(empId);
     closeModal();
@@ -1141,7 +1220,7 @@ function viewComplianceRecord(empId, recId){
    no server needed, works fine from a static GitHub Pages site. Scope is drive.file, so the
    app can only see/edit the files and folders it creates itself, never your whole Drive. */
 let gisTokenClient = null, driveAccessToken = null, driveTokenExpiry = 0;
-let driveSyncTimer = null, driveBusy = false;
+let driveSyncTimer = null, driveAutoInterval = null, driveBusy = false, driveReconnecting = false;
 
 function driveConnected(){ return !!(driveAccessToken && Date.now() < driveTokenExpiry); }
 
@@ -1151,12 +1230,18 @@ function initGis(){
     client_id: ORG.gdrive.clientId,
     scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets',
     callback: async (resp)=>{
-      if(resp.error){ toast('Google sign-in failed: '+resp.error, true); return; }
+      driveReconnecting = false;
+      if(resp.error){
+        if(resp.error!=='immediate_failed' && resp.error!=='popup_closed' && resp.error!=='popup_failed_to_open') toast('Google sign-in failed: '+resp.error, true);
+        updateDriveStatusUI(); return;
+      }
       driveAccessToken = resp.access_token;
       driveTokenExpiry = Date.now() + (Number(resp.expires_in||3500)-60)*1000;
       ORG.gdrive.connected = true; await saveOrg();
       toast('Google Drive connected.');
+      ensureStaffName();
       try{ await driveSetup(); await driveSyncNow(); }catch(e){}
+      startAutoSyncLoop();
       if(activeTab==='settings') renderSettings(document.getElementById('content'), document.getElementById('tabActions'));
     }
   });
@@ -1170,8 +1255,28 @@ function connectDrive(){
 async function disconnectDrive(){
   driveAccessToken = null; driveTokenExpiry = 0;
   ORG.gdrive.connected = false; await saveOrg();
+  if(driveAutoInterval){ clearInterval(driveAutoInterval); driveAutoInterval = null; }
   toast('Disconnected from Google Drive.');
   if(activeTab==='settings') renderSettings(document.getElementById('content'), document.getElementById('tabActions'));
+}
+/* Called once on app load in every window/tab: if this browser previously connected Drive
+   here, try to re-establish the session quietly (no popup) so sync "just works" without the
+   person re-clicking Connect in each new window. If Google can't do it silently (no active
+   Google session in this browser, or the browser blocks the silent attempt), it fails quietly
+   and the Settings tab shows a Connect button as normal. */
+function attemptSilentDriveReconnect(){
+  if(!ORG.gdrive || !ORG.gdrive.connected || !ORG.gdrive.clientId) return;
+  driveReconnecting = true;
+  let tries = 0;
+  const iv = setInterval(()=>{
+    tries++;
+    if(window.google && google.accounts && google.accounts.oauth2){
+      clearInterval(iv);
+      initGis();
+      if(gisTokenClient) gisTokenClient.requestAccessToken({ prompt:'' });
+      else driveReconnecting = false;
+    } else if(tries > 24){ clearInterval(iv); driveReconnecting = false; }
+  }, 250);
 }
 async function driveFetch(url, opts){
   opts = opts || {};
@@ -1214,10 +1319,17 @@ async function driveUploadJson(name, parentId, contentObj, existingFileId){
   const res = await driveFetch(url, { method: existingFileId?'PATCH':'POST', headers:{'Content-Type':`multipart/related; boundary=${boundary}`}, body });
   return res.json();
 }
+/* Change-triggered sync: fires a few seconds after the person edits something, so a save
+   feels near-instant. The 20-second interval below is the backstop that runs regardless,
+   so other open windows/tabs and any missed edits still land within 20s. */
 function scheduleDriveSync(){
-  if(!ORG || !ORG.gdrive || !ORG.gdrive.connected || !driveConnected()) return;
+  if(!ORG || !ORG.gdrive || !ORG.gdrive.connected) return;
   clearTimeout(driveSyncTimer);
-  driveSyncTimer = setTimeout(driveSyncNow, 2500);
+  driveSyncTimer = setTimeout(()=> driveSyncNow(), 3000);
+}
+function startAutoSyncLoop(){
+  if(driveAutoInterval) return;
+  driveAutoInterval = setInterval(()=>{ if(ORG.gdrive && ORG.gdrive.connected) driveSyncNow(); }, 20000);
 }
 async function driveSyncNow(){
   if(!driveConnected() || driveBusy || !ORG.gdrive.connected) return;
@@ -1226,12 +1338,15 @@ async function driveSyncNow(){
     if(!ORG.gdrive.folderId) await driveSetup();
     const result = await driveUploadJson('data.json', ORG.gdrive.folderId, buildPayload(), ORG.gdrive.fileId);
     if(result && result.id){ ORG.gdrive.fileId = result.id; ORG.gdrive.lastSynced = new Date().toISOString(); await saveOrgSilent(); updateDriveStatusUI(); }
-  }catch(e){ /* silent — retried on next change */ }
+    try{ await driveExportSheet(true); }catch(e){ /* sheet sync is best-effort; json is the source of truth */ }
+  }catch(e){ /* silent — retried on next 20s tick */ }
   driveBusy = false;
 }
 function updateDriveStatusUI(){
   const el = document.getElementById('driveLastSync');
-  if(el) el.textContent = ORG.gdrive.lastSynced ? ('Last synced ' + new Date(ORG.gdrive.lastSynced).toLocaleString('en-IN')) : 'Not yet synced';
+  if(!el) return;
+  if(driveReconnecting){ el.textContent = 'Reconnecting to Google Drive…'; return; }
+  el.textContent = ORG.gdrive.lastSynced ? ('Last synced ' + new Date(ORG.gdrive.lastSynced).toLocaleString('en-IN') + ' · auto-syncs every 20s') : 'Not yet synced';
 }
 async function driveListBackups(){
   if(!driveConnected() || !ORG.gdrive.backupsFolderId) return [];
@@ -1276,30 +1391,153 @@ async function driveRestoreBackup(fileId, label){
     }catch(e){ toast('Restore failed.', true); }
   };
 }
-async function driveExportSheet(){
-  if(!driveConnected()){ toast('Connect Google Drive first.', true); return; }
-  try{
+const SHEET_TABS = ['Employees','Salary History','Payslips','Compliance'];
+async function driveEnsureSheet(){
+  let sheetId = ORG.gdrive.sheetId;
+  if(sheetId){
+    // confirm it still exists / is reachable; a stale id (e.g. deleted by hand) falls through to recreate
+    try{ const chk = await driveFetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=spreadsheetId,sheets.properties.title`);
+      if(!chk.ok) sheetId = null; else {
+        const meta = await chk.json();
+        const have = (meta.sheets||[]).map(s=>s.properties.title);
+        const missing = SHEET_TABS.filter(t=>!have.includes(t));
+        if(missing.length){
+          await driveFetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}:batchUpdate`, { method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ requests: missing.map(title=>({ addSheet:{ properties:{title} } })) }) });
+        }
+      }
+    }catch(e){ sheetId = null; }
+  }
+  if(!sheetId){
+    const cres = await driveFetch('https://sheets.googleapis.com/v4/spreadsheets', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ properties:{title:(ORG.companyName||'Valles EASY EMS')+' — Live Data'}, sheets: SHEET_TABS.map(title=>({properties:{title}})) }) });
+    const cdata = await cres.json();
+    sheetId = cdata.spreadsheetId; ORG.gdrive.sheetId = sheetId;
     if(!ORG.gdrive.folderId) await driveSetup();
-    let sheetId = ORG.gdrive.sheetId;
-    if(!sheetId){
-      const cres = await driveFetch('https://sheets.googleapis.com/v4/spreadsheets', { method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ properties:{title:(ORG.companyName||'Valles EASY EMS')+' — Live Data'}, sheets:[{properties:{title:'Employees'}},{properties:{title:'Payslips'}}] }) });
-      const cdata = await cres.json();
-      sheetId = cdata.spreadsheetId; ORG.gdrive.sheetId = sheetId;
-      await driveFetch(`https://www.googleapis.com/drive/v3/files/${sheetId}?addParents=${ORG.gdrive.folderId}&fields=id`, {method:'PATCH'});
-      await saveOrgSilent();
-    }
-    const empRows = [['Employee ID','Name','Department','Designation','Grade','Location','Division','PAN','DOJ']]
-      .concat(EMPLOYEES.map(e=>[e.empCode,e.name,e.department,e.designation,e.grade,e.location,e.division,e.pan,e.doj]));
-    const slipRows = [['Employee','Employee ID','Period','Gross','Total Deductions','Net Pay','Tax Regime','Generated At']]
-      .concat(PAYSLIPS.map(p=>[p.empName,p.empCode,p.period,p.gross,p.totalDeductions,p.netPay,p.taxRegime,p.generatedAt]));
-    await driveFetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Employees!A1:Z${empRows.length}?valueInputOption=RAW`,
-      { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({values:empRows}) });
-    await driveFetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Payslips!A1:Z${slipRows.length}?valueInputOption=RAW`,
-      { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({values:slipRows}) });
-    toast('Employees & payslips exported to Google Sheet.');
-    if(activeTab==='settings') renderSettings(document.getElementById('content'), document.getElementById('tabActions'));
-  }catch(e){ toast('Sheet export failed.', true); }
+    await driveFetch(`https://www.googleapis.com/drive/v3/files/${sheetId}?addParents=${ORG.gdrive.folderId}&fields=id`, {method:'PATCH'});
+    await saveOrgSilent();
+  }
+  return sheetId;
+}
+async function driveWriteSheetTab(sheetId, tab, rows){
+  await driveFetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(tab)}!A1:Z${Math.max(rows.length,1)}?valueInputOption=RAW`,
+    { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({values:rows}) });
+}
+/* Builds/updates the live Google Sheet from the current in-app data — one tab per data table.
+   Runs automatically after every JSON sync (silent=true); also callable manually from Settings. */
+async function driveExportSheet(silent){
+  if(!driveConnected()){ if(!silent) toast('Connect Google Drive first.', true); return; }
+  try{
+    const sheetId = await driveEnsureSheet();
+
+    const empRows = [['Employee ID','Name','Designation','Department','Grade','Location','Division','Date of Joining','Date of Birth','Gender','Phone','Email','PAN','Aadhaar','UAN','PF Number','ESIC No.','Bank Name','Bank Account No.','IFSC']]
+      .concat(EMPLOYEES.map(e=>[e.empCode,e.name,e.designation,e.department,e.grade,e.location,e.division,e.doj,e.dob,e.gender,e.phone,e.email,e.pan,e.aadhaar,e.uan,e.pfNumber,e.esicNo,e.bankName,e.bankAccNo,e.ifsc]));
+
+    const salRows = [['Employee ID','Name','Effective From','Basic','HRA','Children Education','Other Allowance','LTA','Reimbursement','Tax Regime','Rent Paid (annual)','Metro City','80C Declared','80D Declared','Other Exemptions','Revised At','Reason']];
+    EMPLOYEES.forEach(e=> (e.salaryHistory||[]).forEach(h=> salRows.push([e.empCode,e.name,h.effectiveFrom,h.basic,h.hra,h.childrenEducation,h.otherAllowance,h.lta,h.reimbursement,h.taxRegime,h.rentPaidAnnual,h.metroCity?'Metro':'Non-Metro',h.declared80C,h.declared80D,h.otherExemptions,h.revisedAt,h.reason])));
+
+    const slipRows = [['Employee','Employee ID','Period','Department','Gross','Total Deductions','Net Pay','Tax Regime','Bank Account No.','Generated At']]
+      .concat(PAYSLIPS.map(p=>[p.empName,p.empCode,p.period,p.department,p.gross,p.totalDeductions,p.netPay,p.taxRegime,p.bankAccNo,p.generatedAt]));
+
+    const compRows = [['Employee','Employee ID','Type','Period','Date','Reference No.','Amount','Remarks','Files Attached']];
+    Object.keys(COMPLIANCE||{}).forEach(empId=>{
+      const e = EMPLOYEES.find(x=>x.id===empId);
+      (COMPLIANCE[empId]||[]).forEach(r=> compRows.push([e?e.name:'', e?e.empCode:'', r.type, r.period, r.date, r.refNo, r.amount, r.remarks, (r.files||[]).length]));
+    });
+
+    await driveWriteSheetTab(sheetId, 'Employees', empRows);
+    await driveWriteSheetTab(sheetId, 'Salary History', salRows);
+    await driveWriteSheetTab(sheetId, 'Payslips', slipRows);
+    await driveWriteSheetTab(sheetId, 'Compliance', compRows);
+
+    if(!silent){ toast('Google Sheet updated — Employees, Salary History, Payslips & Compliance tabs.'); if(activeTab==='settings') renderSettings(document.getElementById('content'), document.getElementById('tabActions')); }
+  }catch(e){ if(!silent) toast('Sheet export failed.', true); throw e; }
+}
+
+/* ============================= MULTI-STAFF SYNC SAFETY ============================= */
+/* Since several people can have this app open at once on different machines, saves don't
+   just overwrite Drive — they PULL the latest remote data first, MERGE it record-by-record
+   with what's on this device (so a colleague's unrelated edits are never clobbered), and only
+   then push. Records carry _rev/_updatedBy/_updatedAt so we can tell whose edit is newer. */
+function currentStaffName(){ return (localStorage.getItem('vallesEasyEmsStaffName')||'').trim(); }
+function setStaffName(n){ try{ localStorage.setItem('vallesEasyEmsStaffName', (n||'').trim()); }catch(e){} }
+function ensureStaffName(){
+  if(currentStaffName()) return;
+  openModal(`
+    <div class="modal-head"><h3>Who's using this device?</h3></div>
+    <p class="hint">Since a few of you may be working on this at the same time, your name gets tagged on the changes you make — that's how the app knows whose edit is newest if two people touch the same record.</p>
+    <div class="field"><label>Your Name</label><input type="text" id="staffNameInput" placeholder="e.g. Priya"></div>
+    <div class="btn-row"><button class="btn" id="staffNameSave">Continue</button></div>
+  `);
+  document.getElementById('staffNameSave').onclick = ()=>{
+    const v = document.getElementById('staffNameInput').value.trim();
+    if(!v){ toast('Please enter a name.', true); return; }
+    setStaffName(v); closeModal();
+  };
+}
+function tagRecord(rec, isNew){
+  rec._rev = isNew ? 1 : (Number(rec._rev)||0) + 1;
+  rec._updatedBy = currentStaffName() || 'Unknown';
+  rec._updatedAt = new Date().toISOString();
+  return rec;
+}
+async function pullRemotePayload(){
+  if(!driveConnected() || !ORG.gdrive.fileId) return null;
+  try{
+    const res = await driveFetch(`https://www.googleapis.com/drive/v3/files/${ORG.gdrive.fileId}?alt=media`);
+    if(!res.ok) return null;
+    return await res.json();
+  }catch(e){ return null; }
+}
+/* Merges a remote collection into the local one by id, and honours deletions: any id
+   tombstoned on EITHER this device or the remote payload is dropped from the result, no
+   matter which side still has a live copy of it — deletion always wins, matching the "this
+   cannot be undone" the delete confirmation already promises. A colleague's newer edit
+   (_rev) or brand-new record is otherwise adopted; anything the same or older stays as our
+   in-memory copy (which may include the change we're about to save). */
+function mergeCollection(tombKind, localArr, remoteArr, remoteTomb){
+  ensureLocal();
+  remoteArr = remoteArr || [];
+  remoteTomb = remoteTomb || {};
+  if(!LOCAL.tombstones[tombKind]) LOCAL.tombstones[tombKind] = {};
+  const mergedTomb = Object.assign({}, remoteTomb, LOCAL.tombstones[tombKind]);
+  LOCAL.tombstones[tombKind] = mergedTomb;
+  let result = localArr.slice();
+  remoteArr.forEach(r=>{
+    if(mergedTomb[r.id]) return;
+    const idx = result.findIndex(x=>x.id===r.id);
+    if(idx===-1){ result.push(r); return; }
+    const localRev = Number(result[idx]._rev)||0, remoteRev = Number(r._rev)||0;
+    if(remoteRev > localRev) result[idx] = r;
+  });
+  result = result.filter(x=> !mergedTomb[x.id]);
+  try{ localStorage.setItem(LS_KEY, JSON.stringify(LOCAL)); }catch(e){}
+  return result;
+}
+/* Checks whether a specific record changed on Drive after `snapshotRev` (i.e. someone else
+   saved a newer edit while this device had the record open in a form). Returns the newer
+   remote record if so, otherwise null. Fails open (returns null) if Drive can't be reached
+   right now, so editing still works offline. */
+async function checkRecordConflict(listKey, id, snapshotRev){
+  const remote = await pullRemotePayload();
+  if(!remote) return null;
+  const rec = (remote[listKey]||[]).find(x=>x.id===id);
+  if(rec && (Number(rec._rev)||0) > snapshotRev) return rec;
+  return null;
+}
+function conflictWarning(who, when, onDiscard, onOverwrite){
+  openModal(`
+    <div class="modal-head"><h3>⚠️ Someone Else Just Updated This</h3></div>
+    <p><b>${esc(who||'A colleague')}</b> saved a change to this record at <b>${new Date(when).toLocaleTimeString('en-IN')}</b> — after you opened this form. Saving now would overwrite their update.</p>
+    <div class="btn-row">
+      <button class="btn" id="cwDiscard">Show Latest &amp; Re-edit</button>
+      <button class="btn danger" id="cwOverwrite">Overwrite Anyway</button>
+      <button class="btn secondary" id="mCancel">Cancel</button>
+    </div>
+  `, true);
+  document.getElementById('mCancel').onclick = closeModal;
+  document.getElementById('cwDiscard').onclick = ()=>{ closeModal(); onDiscard && onDiscard(); };
+  document.getElementById('cwOverwrite').onclick = ()=>{ closeModal(); onOverwrite && onOverwrite(); };
 }
 
 /* ============================= BACKUP & RESTORE ============================= */
@@ -1456,18 +1694,27 @@ function renderSettings(c, actions){
     </div>
 
     <div class="card">
+      <h2>Working as</h2>
+      <p style="color:var(--muted);font-size:13px;">Since a few of you may use this app at the same time, your name is tagged on the changes you make. This is how the app knows whose edit is newest if two people touch the same record, and who to name in a conflict warning.</p>
+      <div class="field" style="max-width:280px;"><label>Your Name</label><input type="text" id="staffNameField" value="${esc(currentStaffName())}" placeholder="e.g. Priya"></div>
+      <button class="btn secondary sm" id="saveStaffName">Save Name</button>
+      ${(()=>{ const la = lastActivity(); return la ? `<div class="hint" style="margin-top:10px;">Most recent change anywhere: <b>${esc(la.by)}</b> · ${esc(timeAgo(la.at))}</div>` : ''; })()}
+    </div>
+
+    <div class="card">
       <h2>Google Drive Backup &amp; Sync</h2>
-      <p style="color:var(--muted);font-size:13px;">Connects this app (hosted on GitHub Pages) to a folder in <b>your own</b> Google Drive. Every save is synced to <code>data.json</code> there, and "Backup Now" keeps a rolling set of the <b>last 5</b> dated JSON backups you can restore from. Optionally, export a readable copy to a Google Sheet too. See README.md in the project for the one-time Google Cloud setup. This app only ever touches files/folders it creates — nothing else in your Drive.</p>
+      <p style="color:var(--muted);font-size:13px;">Connects this app (hosted on GitHub Pages) to a folder in <b>your own</b> Google Drive. <code>data.json</code> there is kept live — synced a few seconds after any change, and automatically every <b>20 seconds</b> as a backstop, so it stays current across every window/tab you have this app open in. The same sync also keeps a <b>Google Sheet</b> up to date, with one tab each for Employees, Salary History, Payslips and Compliance. "Backup Now" additionally keeps a rolling set of the <b>last 5</b> dated JSON snapshots you can restore from. See README.md for the one-time Google Cloud setup. This app only ever touches files/folders it creates — nothing else in your Drive.</p>
       <div class="field"><label>Google OAuth Client ID</label><input type="text" id="gClientId" placeholder="xxxxxxxxxx.apps.googleusercontent.com" value="${esc(ORG.gdrive.clientId||'')}"></div>
       <div class="btn-row" style="margin-bottom:10px;">
         <button class="btn secondary sm" id="saveClientId">Save Client ID</button>
         ${driveConnected() ? '<button class="btn sm" id="disconnectDrive">Disconnect</button>' : '<button class="btn sm" id="connectDriveBtn">Connect Google Drive</button>'}
       </div>
       ${driveConnected() ? `
-        <div style="font-size:13px;color:var(--muted);margin-bottom:10px;" id="driveLastSync">${ORG.gdrive.lastSynced?('Last synced '+new Date(ORG.gdrive.lastSynced).toLocaleString('en-IN')):'Not yet synced'}</div>
+        <div style="font-size:13px;color:var(--muted);margin-bottom:10px;" id="driveLastSync">${ORG.gdrive.lastSynced?('Last synced '+new Date(ORG.gdrive.lastSynced).toLocaleString('en-IN')+' · auto-syncs every 20s'):'Not yet synced'}</div>
         <div class="btn-row" style="margin-bottom:10px;">
           <button class="btn sm" id="driveBackupBtn">⬆ Backup Now to Drive</button>
-          <button class="btn secondary sm" id="driveSheetBtn">📊 Export to Google Sheet</button>
+          <button class="btn secondary sm" id="driveSheetBtn">📊 Sync Google Sheet Now</button>
+          ${ORG.gdrive.sheetId ? `<a class="btn secondary sm" href="https://docs.google.com/spreadsheets/d/${ORG.gdrive.sheetId}/edit" target="_blank" rel="noopener">↗ Open Sheet</a>` : ''}
         </div>
         <div class="section-label">Last 5 Backups in Drive</div>
         <div id="driveBackupList"><div class="empty" style="padding:12px;">Loading…</div></div>
@@ -1511,6 +1758,12 @@ function renderSettings(c, actions){
     ORG.adminPasswordHash = await sha256(fd.get('nw')); await saveOrg(); ev.target.reset(); toast('Password changed.');
   };
   c.querySelectorAll('[data-revise]').forEach(b=> b.onclick = ()=> openReviseSalary(b.dataset.revise));
+  const saveNameBtn = document.getElementById('saveStaffName');
+  if(saveNameBtn) saveNameBtn.onclick = ()=>{
+    const v = document.getElementById('staffNameField').value.trim();
+    if(!v){ toast('Please enter a name.', true); return; }
+    setStaffName(v); toast('Name saved.');
+  };
   document.getElementById('saveClientId').onclick = async ()=>{    ORG.gdrive.clientId = document.getElementById('gClientId').value.trim();
     gisTokenClient = null; await saveOrg(); toast('Client ID saved.');
   };
@@ -1521,7 +1774,7 @@ function renderSettings(c, actions){
   const backupBtn = document.getElementById('driveBackupBtn');
   if(backupBtn) backupBtn.onclick = driveBackupNow;
   const sheetBtn = document.getElementById('driveSheetBtn');
-  if(sheetBtn) sheetBtn.onclick = driveExportSheet;
+  if(sheetBtn) sheetBtn.onclick = ()=> driveExportSheet(false);
   const backupListEl = document.getElementById('driveBackupList');
   if(backupListEl){
     driveListBackups().then(files=>{
@@ -1545,6 +1798,7 @@ function renderSettings(c, actions){
   for(const e of EMPLOYEES){ await loadCompliance(e.id); }
   updateCompBadge();
   setTab('dashboard');
+  if(ORG.gdrive && ORG.gdrive.connected){ attemptSilentDriveReconnect(); startAutoSyncLoop(); ensureStaffName(); }
 })();
 </script>
 </body>
