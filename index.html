@@ -173,7 +173,8 @@
   .totrow td{font-weight:800;background:#F4F6FA;}
   .netrow td{font-weight:800;background:#EAF6EF;color:var(--good);font-size:14px;}
   .payslip-foot{font-size:10.5px;color:var(--muted);padding-top:10px;display:flex;justify-content:space-between;}
-  .other-pay-title{font-size:11.5px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;margin:16px 0 6px;color:var(--ink-soft);}
+  .pstable tr.wordsrow td{font-size:11px;padding:8px 9px;font-style:italic;color:var(--ink-soft);background:#FAFBFD;}
+  .pstable tr.wordsrow .wlabel{font-weight:800;font-style:normal;text-transform:uppercase;letter-spacing:.05em;font-size:10px;color:var(--ink);}
   .regime-note{font-size:10px;color:var(--muted);margin-top:10px;line-height:1.6;border-top:1px dashed var(--rule);padding-top:8px;}
 
   .app-footer{margin:34px 0 8px;padding-top:16px;border-top:1px solid var(--rule);text-align:center;font-size:11.5px;color:var(--muted);line-height:1.9;}
@@ -183,6 +184,8 @@
     body *{visibility:hidden;}
     #printArea, #printArea *{visibility:visible;}
     #printArea{position:absolute;left:0;top:0;width:100%;padding:0;margin:0;}
+    #printArea img{display:block !important;}
+    .payslip, .payslip *{-webkit-print-color-adjust:exact !important;print-color-adjust:exact !important;}
     .no-print{display:none !important;}
   }
 </style>
@@ -289,6 +292,43 @@ function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(
 function money(n){ n = Number(n)||0; return "₹" + n.toLocaleString('en-IN', {maximumFractionDigits:0}); }
 function money2(n){ n = Number(n)||0; return "₹" + n.toLocaleString('en-IN', {maximumFractionDigits:2}); }
 function esc(s){ return (s==null?'':String(s)).replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+
+/* Indian numbering system — rupees in words (lakh/crore), used on the payslip */
+const W_ONES = ['','One','Two','Three','Four','Five','Six','Seven','Eight','Nine','Ten','Eleven','Twelve',
+  'Thirteen','Fourteen','Fifteen','Sixteen','Seventeen','Eighteen','Nineteen'];
+const W_TENS = ['','','Twenty','Thirty','Forty','Fifty','Sixty','Seventy','Eighty','Ninety'];
+function twoDigitWords(n){
+  if(n < 20) return W_ONES[n];
+  return W_TENS[Math.floor(n/10)] + (n%10 ? ' ' + W_ONES[n%10] : '');
+}
+function threeDigitWords(n){
+  let out = '';
+  if(n > 99){ out += W_ONES[Math.floor(n/100)] + ' Hundred'; if(n%100) out += ' '; }
+  if(n%100) out += twoDigitWords(n%100);
+  return out;
+}
+function integerToIndianWords(n){
+  n = Math.floor(Math.abs(Number(n)||0));
+  if(n === 0) return 'Zero';
+  const parts = [];
+  const crore = Math.floor(n / 10000000); n %= 10000000;
+  const lakh  = Math.floor(n / 100000);   n %= 100000;
+  const thou  = Math.floor(n / 1000);     n %= 1000;
+  const rest  = n;
+  if(crore) parts.push(integerToIndianWords(crore) + ' Crore');
+  if(lakh)  parts.push(twoDigitWords(lakh) + ' Lakh');
+  if(thou)  parts.push(twoDigitWords(thou) + ' Thousand');
+  if(rest)  parts.push(threeDigitWords(rest));
+  return parts.join(' ');
+}
+function rupeesInWords(amount){
+  const n = Math.abs(Number(amount)||0);
+  const rupees = Math.floor(n);
+  const paise = Math.round((n - rupees) * 100);
+  let out = 'Rupees ' + integerToIndianWords(rupees);
+  if(paise > 0) out += ' and ' + twoDigitWords(paise) + ' Paise';
+  return out + ' Only';
+}
 function toast(msg, isErr){
   const wrap = document.getElementById('toastWrap');
   const t = document.createElement('div'); t.className = 'toast'+(isErr?' err':''); t.textContent = msg;
@@ -522,9 +562,9 @@ function openEmployeeForm(empId){
       </div>
       ${!isEdit ? `
       <div class="section-label">Starting Salary Structure</div>
-      <p class="hint" style="margin:-6px 0 10px;">You can revise this later from the employee's profile — every revision is kept on record for audit purposes.</p>
+      <p class="hint" style="margin:-6px 0 10px;">You can revise this later from Settings &rarr; Salary Revision — every revision is kept on record for audit purposes.</p>
       ${salaryFieldsHtml({basic:0,hra:0,childrenEducation:0,otherAllowance:0,lta:0,reimbursement:0,taxRegime:'new',rentPaidAnnual:0,metroCity:true,declared80C:0,declared80D:0,otherExemptions:0})}
-      ` : `<div class="hint">Salary is managed separately via <b>Revise Salary</b> on the employee's profile, so every change stays on the audit trail.</div>`}
+      ` : `<div class="hint">Salary is managed separately under <b>Settings → Salary Revision</b>, so every change stays on the audit trail.</div>`}
 
       <div class="divider"></div>
       <div class="btn-row">
@@ -569,14 +609,14 @@ function openEmployeeForm(empId){
 function salaryFieldsHtml(s){
   return `
     <div class="grid cols-4">
-      <div class="field"><label>Basic (monthly)</label><input type="number" min="0" name="basic" value="${s.basic||0}"></div>
-      <div class="field"><label>HRA (monthly)</label><input type="number" min="0" name="hra" value="${s.hra||0}"></div>
-      <div class="field"><label>Children Education Allowance</label><input type="number" min="0" name="childrenEducation" value="${s.childrenEducation||0}"></div>
-      <div class="field"><label>Other Allowance</label><input type="number" min="0" name="otherAllowance" value="${s.otherAllowance||0}"></div>
+      <div class="field"><label>Basic (monthly)</label><input type="number" min="0" step="0.01" name="basic" value="${s.basic||0}"></div>
+      <div class="field"><label>HRA (monthly)</label><input type="number" min="0" step="0.01" name="hra" value="${s.hra||0}"></div>
+      <div class="field"><label>Children Education Allowance</label><input type="number" min="0" step="0.01" name="childrenEducation" value="${s.childrenEducation||0}"></div>
+      <div class="field"><label>Other Allowance</label><input type="number" min="0" step="0.01" name="otherAllowance" value="${s.otherAllowance||0}"></div>
     </div>
     <div class="grid cols-4">
-      <div class="field"><label>LTA (monthly)</label><input type="number" min="0" name="lta" value="${s.lta||0}"></div>
-      <div class="field"><label>Reimbursement (non-taxable, monthly)</label><input type="number" min="0" name="reimbursement" value="${s.reimbursement||0}"></div>
+      <div class="field"><label>LTA (monthly)</label><input type="number" min="0" step="0.01" name="lta" value="${s.lta||0}"></div>
+      <div class="field"><label>Reimbursement (non-taxable, monthly)</label><input type="number" min="0" step="0.01" name="reimbursement" value="${s.reimbursement||0}"></div>
       <div class="field"><label>Tax Regime</label><select name="taxRegime" class="regimeSel">
         <option value="new" ${s.taxRegime!=='old'?'selected':''}>New Regime</option>
         <option value="old" ${s.taxRegime==='old'?'selected':''}>Old Regime</option>
@@ -585,15 +625,15 @@ function salaryFieldsHtml(s){
     <div class="oldRegimeBlock" style="display:${s.taxRegime==='old'?'grid':'none'};" data-oldblock>
       <div class="section-label" style="margin-top:6px;">Old Regime Declarations (for HRA exemption &amp; deductions)</div>
       <div class="grid cols-4">
-        <div class="field"><label>Rent Paid (annual)</label><input type="number" min="0" name="rentPaidAnnual" value="${s.rentPaidAnnual||0}"></div>
+        <div class="field"><label>Rent Paid (annual)</label><input type="number" min="0" step="0.01" name="rentPaidAnnual" value="${s.rentPaidAnnual||0}"></div>
         <div class="field"><label>City Type</label><select name="metroCity">
           <option value="true" ${s.metroCity?'selected':''}>Metro (50% of Basic)</option>
           <option value="false" ${!s.metroCity?'selected':''}>Non-Metro (40% of Basic)</option>
         </select></div>
-        <div class="field"><label>80C Declared (max 1,50,000)</label><input type="number" min="0" name="declared80C" value="${s.declared80C||0}"></div>
-        <div class="field"><label>80D Declared</label><input type="number" min="0" name="declared80D" value="${s.declared80D||0}"></div>
+        <div class="field"><label>80C Declared (max 1,50,000)</label><input type="number" min="0" step="0.01" name="declared80C" value="${s.declared80C||0}"></div>
+        <div class="field"><label>80D Declared</label><input type="number" min="0" step="0.01" name="declared80D" value="${s.declared80D||0}"></div>
       </div>
-      <div class="grid cols-4"><div class="field"><label>Other Exemptions</label><input type="number" min="0" name="otherExemptions" value="${s.otherExemptions||0}"></div></div>
+      <div class="grid cols-4"><div class="field"><label>Other Exemptions</label><input type="number" min="0" step="0.01" name="otherExemptions" value="${s.otherExemptions||0}"></div></div>
     </div>
   `;
 }
@@ -649,10 +689,8 @@ async function viewEmployee(empId){
       <div><label>Gross Monthly</label><div><b>${money(gross)}</b></div></div>
     </div>
 
-    <div class="section-label" style="display:flex;align-items:center;justify-content:space-between;">
-      <span>Salary History (Audit Trail)</span>
-      <button class="btn sm" id="reviseSalaryBtn" type="button">↻ Revise Salary</button>
-    </div>
+    <div class="section-label">Salary History (Audit Trail)</div>
+    <p class="hint" style="margin:-4px 0 8px;">Read-only. Salary revisions are made from <b>Settings → Salary Revision</b>.</p>
     <table><thead><tr><th>Effective From</th><th>Basic</th><th>HRA</th><th>Gross</th><th>Regime</th><th>Revised</th><th>Reason</th></tr></thead><tbody>
       ${hist.map(h=>`<tr>
         <td>${esc(h.effectiveFrom)}</td><td class="num-cell">${money(h.basic)}</td><td class="num-cell">${money(h.hra)}</td>
@@ -669,7 +707,6 @@ async function viewEmployee(empId){
     <div class="btn-row"><button class="btn secondary" id="mCancel">Close</button></div>
   `, true);
   document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
-  document.getElementById('reviseSalaryBtn').onclick = ()=> openReviseSalary(empId);
 }
 
 function openReviseSalary(empId){
@@ -701,7 +738,7 @@ function openReviseSalary(empId){
     e.salaryHistory.push(entry);
     await saveEmployees();
     closeModal(); toast('Salary revision recorded.');
-    viewEmployee(empId);
+    render();
   };
 }
 
@@ -787,9 +824,76 @@ function renderPayslips(c, actions){
     ${PAYSLIPS.slice().reverse().map(p=>`
       <tr><td>${esc(p.empName)}</td><td>${esc(p.period)}</td><td class="num-cell">${money(p.gross)}</td>
       <td class="num-cell">${money(p.totalDeductions)}</td><td class="num-cell"><b>${money(p.netPay)}</b></td>
-      <td><button class="btn secondary sm" data-open="${p.id}">View / Print</button></td></tr>`).join('')}
+      <td class="no-print" style="white-space:nowrap;">
+        <button class="btn secondary sm" data-open="${p.id}">View / Print</button>
+        <button class="btn secondary sm" data-editslip="${p.id}">✎ Edit</button>
+        <button class="btn danger sm" data-delslip="${p.id}">🗑</button>
+      </td></tr>`).join('')}
   </tbody></table>`;
   wrap.querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>openPayslipView(b.dataset.open));
+  wrap.querySelectorAll('[data-editslip]').forEach(b=>b.onclick=()=>openEditPayslip(b.dataset.editslip));
+  wrap.querySelectorAll('[data-delslip]').forEach(b=>b.onclick=()=>deletePayslip(b.dataset.delslip));
+}
+
+/* ---- Edit a generated payslip (corrections) ---- */
+function openEditPayslip(payslipId){
+  const p = PAYSLIPS.find(x=>x.id===payslipId); if(!p) return;
+  const f = (label, key, val)=>`<div class="field"><label>${label}</label><input type="number" step="0.01" min="0" data-pf="${key}" value="${Number(val)||0}"></div>`;
+  openModal(`
+    <div class="modal-head"><h3>Edit Payslip — ${esc(p.empName)} (${esc(p.period)})</h3><button class="modal-close" id="mClose">✕</button></div>
+    <p class="hint">Adjust the figures on this payslip for corrections. Gross, total deductions and net salary recalculate automatically. This edits <b>only this payslip</b> — it does not change the employee's salary structure.</p>
+    <div class="section-label">Earnings</div>
+    <div class="grid cols-3">
+      ${f('Basic','basic',p.basic)}${f('HRA','hra',p.hra)}${f('Children Education','childrenEducation',p.childrenEducation)}
+      ${f('Other Allowance','otherAllowance',p.otherAllowance)}${f('LTA','lta',p.lta)}
+    </div>
+    <div class="section-label">Deductions</div>
+    <div class="grid cols-3">
+      ${f('Provident Fund','pfEmployee',p.pfEmployee)}${f('ESI','esi',p.esi)}${f('Professional Tax','pt',p.pt)}
+      ${f('Income Tax (TDS)','tds',p.tds)}
+    </div>
+    <div class="divider"></div>
+    <div id="editSlipTotals" class="grid cols-3"></div>
+    <div class="btn-row"><button class="btn" id="saveSlipEdit">Save Changes</button><button class="btn secondary" id="mCancel">Cancel</button></div>
+  `, true);
+  document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+  const inputs = ()=> Array.from(document.querySelectorAll('[data-pf]'));
+  function vals(){ const o={}; inputs().forEach(i=> o[i.dataset.pf] = Number(i.value)||0); return o; }
+  function recalc(){
+    const v = vals();
+    const gross = v.basic + v.hra + v.childrenEducation + v.otherAllowance + v.lta;
+    const ded = v.pfEmployee + v.esi + v.pt + v.tds;
+    document.getElementById('editSlipTotals').innerHTML =
+      `<div><label>Gross Earning</label><div><b>${money2(gross)}</b></div></div>
+       <div><label>Total Deduction</label><div><b>${money2(ded)}</b></div></div>
+       <div><label>Net Salary</label><div><b>${money2(gross-ded)}</b></div></div>
+       <div style="grid-column:1/-1;font-size:11px;color:var(--muted);font-style:italic;">${esc(rupeesInWords(gross-ded))}</div>`;
+  }
+  inputs().forEach(i=> i.addEventListener('input', recalc));
+  recalc();
+  document.getElementById('saveSlipEdit').onclick = async ()=>{
+    const v = vals();
+    Object.assign(p, v);
+    p.gross = v.basic + v.hra + v.childrenEducation + v.otherAllowance + v.lta;
+    p.totalDeductions = v.pfEmployee + v.esi + v.pt + v.tds;
+    p.netPay = p.gross - p.totalDeductions;
+    p.editedAt = new Date().toISOString();
+    await savePayslips(); closeModal(); toast('Payslip updated.'); render();
+  };
+}
+
+function deletePayslip(payslipId){
+  const p = PAYSLIPS.find(x=>x.id===payslipId); if(!p) return;
+  openModal(`
+    <div class="modal-head"><h3>Delete Payslip</h3><button class="modal-close" id="mClose">✕</button></div>
+    <p>Delete the payslip for <b>${esc(p.empName)}</b> for <b>${esc(p.period)}</b>? This cannot be undone.</p>
+    <div class="btn-row"><button class="btn danger" id="confirmDelSlip">Delete</button><button class="btn secondary" id="mCancel">Cancel</button></div>
+  `);
+  document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+  document.getElementById('confirmDelSlip').onclick = async ()=>{
+    PAYSLIPS = PAYSLIPS.filter(x=>x.id!==payslipId);
+    await savePayslips(); closeModal(); toast('Payslip deleted.'); render();
+  };
 }
 
 function openGeneratePayslip(){
@@ -826,8 +930,10 @@ function openGeneratePayslip(){
     const r = computePayslip(emp, period);
     const record = {
       id:uid(), empId:emp.id, empName:emp.name, empCode:emp.empCode, designation:emp.designation,
-      grade:emp.grade, location:emp.location, division:emp.division, pfNumber:emp.pfNumber, uan:emp.uan,
-      dob:emp.dob, doj:emp.doj, pan:emp.pan, bankAccNo:emp.bankAccNo, period,
+      department:emp.department, grade:emp.grade, location:emp.location, division:emp.division,
+      pfNumber:emp.pfNumber, uan:emp.uan,
+      dob:emp.dob, doj:emp.doj, pan:emp.pan,
+      bankAccNo:emp.bankAccNo, bankName:emp.bankName, ifsc:emp.ifsc, period,
       basic:r.salarySnapshot.basic, hra:r.salarySnapshot.hra, childrenEducation:r.salarySnapshot.childrenEducation,
       otherAllowance:r.salarySnapshot.otherAllowance, lta:r.salarySnapshot.lta,
       gross:r.gross, pfEmployee:r.pfEmployee, pfEmployer:r.pfEmployer, esi:r.esi, pt:r.pt, tds:r.tds,
@@ -846,6 +952,13 @@ function openPayslipView(payslipId){
   const monthName = new Date(Number(y),Number(m)-1,1).toLocaleString('en-IN',{month:'2-digit',year:'numeric'}).replace('/','/');
   const monthLong = new Date(Number(y),Number(m)-1,1).toLocaleString('en-IN',{month:'long',year:'numeric'});
   const logoHtml = ORG.logo ? `<img src="${ORG.logo}">` : (ORG.companyName||'C').charAt(0).toUpperCase();
+  /* Bank details as recorded on the staff record. Older payslips predate the bank snapshot,
+     so fall back to the employee's current record where the snapshot is missing. */
+  const emp = EMPLOYEES.find(x=>x.id===p.empId) || {};
+  const bankName = p.bankName || emp.bankName || '';
+  const bankAcc  = p.bankAccNo || emp.bankAccNo || '';
+  const bankIfsc = p.ifsc || emp.ifsc || '';
+  const bankLine = [bankName, bankAcc ? 'A/c '+bankAcc : '', bankIfsc ? 'IFSC '+bankIfsc : ''].filter(Boolean).join(', ');
   const html = `
     <div class="modal-head no-print"><h3>Payslip — ${esc(p.empName)}</h3><button class="modal-close" id="mClose">✕</button></div>
     <div id="printArea">
@@ -859,12 +972,12 @@ function openPayslipView(payslipId){
         <div class="payslip-title">MONTHLY SALARY SLIP</div>
         <table class="pstable">
           <tr><td class="lbl">EMPLOYEE ID</td><td class="val">${esc(p.empCode)}</td><td class="lbl">EMPLOYEE NAME</td><td class="val">${esc(p.empName)}</td></tr>
-          <tr><td class="lbl">DEPARTMENT</td><td class="val">${esc(p.department||'')}</td><td class="lbl">MONTH &amp; YEAR</td><td class="val">${esc(monthName)}</td></tr>
+          <tr><td class="lbl">DEPARTMENT</td><td class="val">${esc(p.department||emp.department||'—')}</td><td class="lbl">MONTH &amp; YEAR</td><td class="val">${esc(monthName)}</td></tr>
           <tr><td class="lbl">DESIGNATION</td><td class="val">${esc(p.designation||'—')}</td><td class="lbl">PAN CARD NUMBER</td><td class="val">${esc(p.pan||'—')}</td></tr>
           <tr><td class="lbl">DATE OF JOINING</td><td class="val">${esc(p.doj||'—')}</td><td class="lbl">GRADE</td><td class="val">${esc(p.grade||'—')}</td></tr>
           <tr><td class="lbl">PF NUMBER</td><td class="val">${esc(p.pfNumber||'—')}</td><td class="lbl">DATE OF BIRTH</td><td class="val">${esc(p.dob||'—')}</td></tr>
           <tr><td class="lbl">LOCATION</td><td class="val">${esc(p.location||'—')}</td><td class="lbl">UAN</td><td class="val">${esc(p.uan||'—')}</td></tr>
-          <tr><td class="lbl">DIVISION</td><td class="val">${esc(p.division||'—')}</td><td class="lbl">BANK ACCOUNT NO.</td><td class="val">${esc(p.bankAccNo||'—')}</td></tr>
+          <tr><td class="lbl">DIVISION</td><td class="val">${esc(p.division||'—')}</td><td class="lbl">BANK ACCOUNT NO.</td><td class="val">${esc(bankAcc||'—')}</td></tr>
         </table>
         <table class="pstable" style="margin-top:-1px;">
           <tr class="earnhead"><td colspan="2">EARNING</td><td colspan="2">DEDUCTION</td></tr>
@@ -875,13 +988,12 @@ function openPayslipView(payslipId){
           <tr><td class="lbl">LTA</td><td class="val amtcell">${money2(p.lta)}</td><td class="lbl">WITHHELD</td><td class="val amtcell">-</td></tr>
           <tr class="totrow"><td>GROSS EARNING</td><td class="amtcell">${money2(p.gross)}</td><td>TOTAL DEDUCTION</td><td class="amtcell">${money2(p.totalDeductions)}</td></tr>
           <tr class="netrow"><td colspan="2">NET SALARY</td><td colspan="2" class="amtcell">${money2(p.netPay)}</td></tr>
+          <tr class="wordsrow"><td colspan="4"><span class="wlabel">Net Salary (in words):</span> ${esc(rupeesInWords(p.netPay))}</td></tr>
         </table>
-        <div class="other-pay-title">Other Payments (not part of taxable salary)</div>
-        <table class="pstable">
-          <tr><td class="lbl">PF EMPLOYER CONTRIBUTION</td><td class="val amtcell">${money2(p.pfEmployer)}</td><td class="lbl">REIMBURSEMENT</td><td class="val amtcell">${money2(p.reimbursement)}</td></tr>
-          <tr class="totrow"><td>TOTAL COMPENSATION (CTC, monthly)</td><td class="amtcell" colspan="3">${money2(p.ctc)}</td></tr>
-        </table>
-        <div class="payslip-foot"><span>Paid Through Bank Transfer</span><span>ELECTRONIC DOCUMENT — NO SIGNATURE REQUIRED</span></div>
+        <div class="payslip-foot">
+          <span>Paid Through Bank Transfer${bankLine ? ' — ' + esc(bankLine) : ''}</span>
+          <span>ELECTRONIC DOCUMENT — NO SIGNATURE REQUIRED</span>
+        </div>
         <div class="regime-note">Computed under the <b>${p.taxRegime==='old'?'Old':'New'} Tax Regime</b> on an estimated annual taxable income of ${money(p.taxableAnnual)}. EPF, ESI, PT and TDS follow the statutory formulas configured in Settings and are provided for reference — please verify against current government notifications and consult your CA before filing.</div>
       </div>
     </div>
@@ -966,7 +1078,7 @@ function openComplianceForm(){
         <div class="field"><label>Period (e.g. Jul 2026)</label><input type="text" name="period" placeholder="Jul 2026"></div>
         <div class="field"><label>Date Filed / Paid</label><input type="date" name="date"></div>
         <div class="field"><label>Reference / Challan No.</label><input type="text" name="refNo"></div>
-        <div class="field"><label>Amount (₹)</label><input type="number" min="0" name="amount" value="0"></div>
+        <div class="field"><label>Amount (₹)</label><input type="number" min="0" step="0.01" name="amount" value="0"></div>
       </div>
       <div class="field"><label>Remarks</label><textarea name="remarks"></textarea></div>
       <div class="field">
@@ -1316,6 +1428,23 @@ function renderSettings(c, actions){
     </div>
 
     <div class="card">
+      <h2>Salary Revision <span class="tag">admin only</span></h2>
+      <p style="color:var(--muted);font-size:13px;">Every revision is recorded with its effective month and reason, and past entries can never be altered. Payslips automatically use whichever salary version was in force for the period being generated.</p>
+      ${EMPLOYEES.length ? `
+        <table><thead><tr><th>Employee</th><th>Current Gross</th><th>Regime</th><th>Effective From</th><th>Revisions</th><th></th></tr></thead><tbody>
+        ${EMPLOYEES.map(e=>{ const s = currentSalary(e); const g = grossOf(s); return `<tr>
+          <td><b>${esc(e.name)}</b><div style="color:var(--muted);font-size:11.5px;">${esc(e.empCode)}</div></td>
+          <td class="num-cell">${money(g)}</td>
+          <td><span class="pill ${s.taxRegime==='old'?'bad':'good'}">${s.taxRegime==='old'?'Old':'New'}</span></td>
+          <td>${esc(s.effectiveFrom||'—')}</td>
+          <td>${(e.salaryHistory||[]).length}</td>
+          <td><button class="btn sm" data-revise="${e.id}">↻ Revise Salary</button></td>
+        </tr>`; }).join('')}
+        </tbody></table>
+      ` : '<div class="empty" style="padding:16px;">No employees yet — add one from the Staff tab.</div>'}
+    </div>
+
+    <div class="card">
       <h2>Admin Password</h2>
       <form id="pwForm">
         <div class="grid cols-2">
@@ -1363,7 +1492,7 @@ function renderSettings(c, actions){
       <div class="grid cols-3" style="align-items:end;margin-bottom:6px;">
         <div class="field" style="margin-bottom:0;"><label>Min</label><input type="number" data-slab="${i}-min" value="${s.min}"></div>
         <div class="field" style="margin-bottom:0;"><label>Max</label><input type="number" data-slab="${i}-max" value="${s.max}"></div>
-        <div class="field" style="margin-bottom:0;display:flex;gap:6px;align-items:end;"><input type="number" data-slab="${i}-amount" value="${s.amount}" style="flex:1;"><button type="button" class="btn danger sm" data-rmslab="${i}">✕</button></div>
+        <div class="field" style="margin-bottom:0;display:flex;gap:6px;align-items:end;"><input type="number" step="0.01" data-slab="${i}-amount" value="${s.amount}" style="flex:1;"><button type="button" class="btn danger sm" data-rmslab="${i}">✕</button></div>
       </div>`).join('');
     document.querySelectorAll('[data-rmslab]').forEach(b=>b.onclick=()=>{ ORG.ptSlabs.splice(Number(b.dataset.rmslab),1); drawSlabs(); });
   }
@@ -1381,8 +1510,8 @@ function renderSettings(c, actions){
     if(curHash !== ORG.adminPasswordHash){ toast('Current password is incorrect.', true); return; }
     ORG.adminPasswordHash = await sha256(fd.get('nw')); await saveOrg(); ev.target.reset(); toast('Password changed.');
   };
-  document.getElementById('saveClientId').onclick = async ()=>{
-    ORG.gdrive.clientId = document.getElementById('gClientId').value.trim();
+  c.querySelectorAll('[data-revise]').forEach(b=> b.onclick = ()=> openReviseSalary(b.dataset.revise));
+  document.getElementById('saveClientId').onclick = async ()=>{    ORG.gdrive.clientId = document.getElementById('gClientId').value.trim();
     gisTokenClient = null; await saveOrg(); toast('Client ID saved.');
   };
   const connectBtn = document.getElementById('connectDriveBtn');
