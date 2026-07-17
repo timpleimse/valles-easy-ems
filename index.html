@@ -209,6 +209,7 @@
       <button class="nav-item" data-tab="backup"><span class="ic">📦</span>Backup</button>
       <button class="nav-item" data-tab="settings"><span class="ic">🔒</span>Settings</button>
     </nav>
+    <div id="navDriveBadge" class="no-print" style="margin-left:auto;padding-left:12px;white-space:nowrap;"></div>
   </div>
 </div>
 
@@ -470,6 +471,7 @@ document.getElementById('overlay').addEventListener('click', (e)=>{ if(e.target.
 /* ============================= RENDER ROUTER ============================= */
 function render(){
   const c = document.getElementById('content'); const actions = document.getElementById('topActions'); actions.innerHTML='';
+  updateDriveStatusUI();
   if(activeTab==='dashboard') return renderDashboard(c, actions);
   if(activeTab==='employees') return renderEmployees(c, actions);
   if(activeTab==='payslips') return renderPayslips(c, actions);
@@ -978,38 +980,81 @@ function hraExemptionAnnual(s){
   const byCity = (s.metroCity?0.5:0.4)*basicAnnual;
   return Math.max(0, Math.min(hraAnnual, byRule, byCity));
 }
-function computePayslip(emp, period){
-  const s = latestSalaryFor(emp, period);
-  const gross = grossOf(s);
-  const basicForPf = ORG.applyPfCeiling ? Math.min(s.basic, ORG.pfCeiling||15000) : s.basic;
-  const pfEmployee = Math.round(basicForPf*0.12);
-  const pfEmployer = pfEmployee; // mirrored, standard practice
-  const esi = gross<=21000 ? Math.round(gross*0.0075) : 0;
-  const pt = ptFor(gross);
-
-  const grossAnnual = gross*12;
-  let taxableAnnual, tdsAnnual;
+/* Computes tax on an annual taxable-income figure for a salary structure's chosen regime,
+   applying the same deductions/exemptions computePayslip uses. Shared by the regular and
+   bonus-inclusive calculations below so both go through identical logic. */
+function annualTaxFor(s, grossAnnual){
+  let taxableAnnual, total;
   if(s.taxRegime==='old'){
     const hraEx = hraExemptionAnnual(s);
     const cap80C = Math.min(s.declared80C||0, 150000);
     taxableAnnual = Math.max(0, grossAnnual - (ORG.taxOld.stdDeduction||50000) - hraEx - cap80C - (s.declared80D||0) - (s.otherExemptions||0));
-    tdsAnnual = oldRegimeAnnualTax(taxableAnnual).total;
+    total = oldRegimeAnnualTax(taxableAnnual).total;
   } else {
     taxableAnnual = Math.max(0, grossAnnual - (ORG.taxNew.stdDeduction||75000));
-    tdsAnnual = newRegimeAnnualTax(taxableAnnual).total;
+    total = newRegimeAnnualTax(taxableAnnual).total;
   }
-  const tds = Math.round(tdsAnnual/12);
+  return { taxableAnnual, total };
+}
+/* Ex-gratia / one-time bonus TDS: per Section 192's average-rate method, the bonus is NOT
+   annualised (×12) like regular salary — that would wildly overstate annual income. Instead:
+   compare "annual tax without the bonus" vs "annual tax with the bonus added once", and the
+   difference is the incremental tax the bonus itself causes. That full amount is deducted in
+   the bonus month; regular monthly TDS in every other month is unaffected. This matches how
+   most Indian payroll systems handle bonus TDS. Bonus is treated as fully taxable, and — per
+   common practice — excluded from PF/ESI wages (it isn't "basic wages") but included in the
+   month's gross for Professional Tax slab lookup, since PT is normally assessed on the
+   month's total salary paid. Review this treatment against your state's PT rules and your
+   company's bonus policy; it's a reasonable default, not a statutory guarantee. */
+function computePayslip(emp, period, bonus){
+  bonus = Number(bonus)||0;
+  const s = latestSalaryFor(emp, period);
+  const gross = grossOf(s);
+  const basicForPf = ORG.applyPfCeiling ? Math.min(s.basic, ORG.pfCeiling||15000) : s.basic;
+  const pfEmployee = Math.round(basicForPf*0.12);
+  const pfEmployer = pfEmployee; // mirrored, standard practice; bonus excluded from PF wages
+  const esi = gross<=21000 ? Math.round(gross*0.0075) : 0; // bonus excluded from ESI wages
+  const grossWithBonus = gross + bonus;
+  const pt = ptFor(grossWithBonus);
+
+  const grossAnnual = gross*12;
+  const regularCalc = annualTaxFor(s, grossAnnual);
+  const regularTds = Math.round(regularCalc.total/12);
+  let tds = regularTds, bonusTaxImpact = 0, taxableAnnual = regularCalc.taxableAnnual;
+  if(bonus > 0){
+    const withBonusCalc = annualTaxFor(s, grossAnnual + bonus);
+    bonusTaxImpact = Math.max(0, withBonusCalc.total - regularCalc.total);
+    tds = regularTds + Math.round(bonusTaxImpact);
+    taxableAnnual = withBonusCalc.taxableAnnual;
+  }
+
   const totalDeductions = pfEmployee+esi+pt+tds;
-  const netPay = gross-totalDeductions;
+  const netPay = gross+bonus-totalDeductions;
   const ctc = gross+pfEmployer+(s.reimbursement||0);
-  return {salarySnapshot:s, gross, pfEmployee, pfEmployer, esi, pt, tds, totalDeductions, netPay, reimbursement:s.reimbursement||0, ctc, taxableAnnual};
+  return {salarySnapshot:s, gross, bonus, pfEmployee, pfEmployer, esi, pt, tds, regularTds, bonusTaxImpact,
+    totalDeductions, netPay, reimbursement:s.reimbursement||0, ctc, taxableAnnual};
 }
 
 /* ============================= PAYSLIPS ============================= */
 function renderPayslips(c, actions){
   actions.innerHTML = `<button class="btn" id="genBtn">+ Generate Payslip</button>`;
   actions.querySelector('#genBtn').onclick = openGeneratePayslip;
-  c.innerHTML = `<div class="card"><h2>Issued Payslips</h2><div id="payslipTableWrap"></div></div>`;
+  const bonusSlips = PAYSLIPS.filter(p=>p.bonus>0);
+  c.innerHTML = `
+    <div class="card"><h2>Issued Payslips</h2><div id="payslipTableWrap"></div></div>
+    ${bonusSlips.length ? `
+    <div class="card">
+      <h2>Bonus &amp; TDS Impact Record</h2>
+      <p style="color:var(--muted);font-size:13px;">Every month an ex-gratia bonus was paid, and the extra tax it caused that month, on top of the employee's regular TDS.</p>
+      <table><thead><tr><th>Employee</th><th>Period</th><th class="num-cell">Bonus Paid</th><th class="num-cell">Regular TDS</th><th class="num-cell">Extra TDS on Bonus</th><th class="num-cell">Total TDS</th></tr></thead><tbody>
+        ${bonusSlips.slice().reverse().map(p=>`
+        <tr><td>${esc(p.empName)}</td><td>${esc(p.period)}</td><td class="num-cell">${money(p.bonus)}</td>
+        <td class="num-cell">${money(p.regularTds!=null?p.regularTds:0)}</td>
+        <td class="num-cell" style="color:var(--accent);"><b>+${money(p.bonusTaxImpact||0)}</b></td>
+        <td class="num-cell"><b>${money(p.tds)}</b></td></tr>`).join('')}
+      </tbody></table>
+    </div>` : ''}
+  `;
   const wrap = document.getElementById('payslipTableWrap');
   if(!PAYSLIPS.length){
     wrap.innerHTML = '<div class="empty"><div class="icon">🧾</div>No payslips generated yet.<div class="cta"><button class="btn" id="emptyGenBtn">+ Generate Payslip</button></div></div>';
@@ -1017,7 +1062,7 @@ function renderPayslips(c, actions){
   }
   wrap.innerHTML = `<table><thead><tr><th>Employee</th><th>Period</th><th class="num-cell">Gross</th><th class="num-cell">Deductions</th><th class="num-cell">Net Pay</th><th></th></tr></thead><tbody>
     ${PAYSLIPS.slice().reverse().map(p=>`
-      <tr><td>${esc(p.empName)}</td><td>${esc(p.period)}</td><td class="num-cell">${money(p.gross)}</td>
+      <tr><td>${esc(p.empName)}${p.bonus>0?' <span class="pill accent" title="Ex-gratia bonus paid this month">+ bonus</span>':''}</td><td>${esc(p.period)}</td><td class="num-cell">${money(p.gross+(p.bonus||0))}</td>
       <td class="num-cell">${money(p.totalDeductions)}</td><td class="num-cell"><b>${money(p.netPay)}</b></td>
       <td class="no-print" style="white-space:nowrap;">
         <button class="btn secondary sm" data-open="${p.id}">View / Print</button>
@@ -1041,12 +1086,12 @@ function openEditPayslip(payslipId){
     <div class="section-label">Earnings</div>
     <div class="grid cols-3">
       ${f('Basic','basic',p.basic)}${f('HRA','hra',p.hra)}${f('Children Education','childrenEducation',p.childrenEducation)}
-      ${f('Other Allowance','otherAllowance',p.otherAllowance)}${f('LTA','lta',p.lta)}
+      ${f('Other Allowance','otherAllowance',p.otherAllowance)}${f('LTA','lta',p.lta)}${f('Ex-Gratia Bonus','bonus',p.bonus)}
     </div>
     <div class="section-label">Deductions</div>
     <div class="grid cols-3">
       ${f('Provident Fund','pfEmployee',p.pfEmployee)}${f('ESI','esi',p.esi)}${f('Professional Tax','pt',p.pt)}
-      ${f('Income Tax (TDS)','tds',p.tds)}
+      ${f('Regular TDS','regularTds',p.regularTds!=null?p.regularTds:p.tds)}${f('Extra TDS on Bonus','bonusTaxImpact',p.bonusTaxImpact)}
     </div>
     <div class="divider"></div>
     <div id="editSlipTotals" class="grid cols-3"></div>
@@ -1058,12 +1103,13 @@ function openEditPayslip(payslipId){
   function recalc(){
     const v = vals();
     const gross = v.basic + v.hra + v.childrenEducation + v.otherAllowance + v.lta;
-    const ded = v.pfEmployee + v.esi + v.pt + v.tds;
+    const tds = v.regularTds + v.bonusTaxImpact;
+    const ded = v.pfEmployee + v.esi + v.pt + tds;
     document.getElementById('editSlipTotals').innerHTML =
-      `<div><label>Gross Earning</label><div><b>${money2(gross)}</b></div></div>
-       <div><label>Total Deduction</label><div><b>${money2(ded)}</b></div></div>
-       <div><label>Net Salary</label><div><b>${money2(gross-ded)}</b></div></div>
-       <div style="grid-column:1/-1;font-size:11px;color:var(--muted);font-style:italic;">${esc(rupeesInWords(gross-ded))}</div>`;
+      `<div><label>Gross Earning (incl. bonus)</label><div><b>${money2(gross+v.bonus)}</b></div></div>
+       <div><label>Total Deduction (TDS: ${money2(tds)})</label><div><b>${money2(ded)}</b></div></div>
+       <div><label>Net Salary</label><div><b>${money2(gross+v.bonus-ded)}</b></div></div>
+       <div style="grid-column:1/-1;font-size:11px;color:var(--muted);font-style:italic;">${esc(rupeesInWords(gross+v.bonus-ded))}</div>`;
   }
   inputs().forEach(i=> i.addEventListener('input', recalc));
   recalc();
@@ -1081,9 +1127,10 @@ function openEditPayslip(payslipId){
 async function submitPayslipEdit(payslipId, v){
     const p = PAYSLIPS.find(x=>x.id===payslipId); if(!p) return;
     Object.assign(p, v);
+    p.tds = v.regularTds + v.bonusTaxImpact;
     p.gross = v.basic + v.hra + v.childrenEducation + v.otherAllowance + v.lta;
-    p.totalDeductions = v.pfEmployee + v.esi + v.pt + v.tds;
-    p.netPay = p.gross - p.totalDeductions;
+    p.totalDeductions = v.pfEmployee + v.esi + v.pt + p.tds;
+    p.netPay = p.gross + v.bonus - p.totalDeductions;
     tagRecord(p, false);
     await savePayslips(); closeModal(); toast('Payslip updated.'); render();
 }
@@ -1107,33 +1154,42 @@ function openGeneratePayslip(){
   const defaultPeriod = new Date().toISOString().slice(0,7);
   openModal(`
     <div class="modal-head"><h3>Generate Payslip</h3><button class="modal-close" id="mClose">✕</button></div>
-    <div class="field"><label>Employee</label><select id="genEmp">${EMPLOYEES.map(e=>`<option value="${e.id}">${esc(e.name)} (${esc(e.empCode)})</option>`).join('')}</select></div>
-    <div class="field"><label>Period (Month)</label><input type="month" id="genPeriod" value="${defaultPeriod}"></div>
+    <div class="grid cols-2">
+      <div class="field"><label>Employee</label><select id="genEmp">${EMPLOYEES.map(e=>`<option value="${e.id}">${esc(e.name)} (${esc(e.empCode)})</option>`).join('')}</select></div>
+      <div class="field"><label>Period (Month)</label><input type="month" id="genPeriod" value="${defaultPeriod}"></div>
+    </div>
+    <div class="field"><label>Ex-Gratia Bonus / One-Time Payment this month (₹, optional)</label><input type="number" min="0" step="0.01" id="genBonus" value="0"></div>
     <div id="genPreview"></div>
     <div class="btn-row"><button class="btn" id="genConfirm">Generate</button><button class="btn secondary" id="mCancel">Cancel</button></div>
   `);
   document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
   function preview(){
     const emp = EMPLOYEES.find(x=>x.id===document.getElementById('genEmp').value); if(!emp) return;
-    const r = computePayslip(emp, document.getElementById('genPeriod').value);
+    const bonus = Number(document.getElementById('genBonus').value)||0;
+    const r = computePayslip(emp, document.getElementById('genPeriod').value, bonus);
     document.getElementById('genPreview').innerHTML = `
       <div class="divider"></div>
       <div class="grid cols-3">
-        <div><label>Gross</label><div>${money(r.gross)}</div></div>
+        <div><label>Gross (regular)</label><div>${money(r.gross)}</div></div>
         <div><label>EPF (12% Basic)</label><div>${money(r.pfEmployee)}</div></div>
         <div><label>ESI (0.75%)</label><div>${r.esi?money(r.esi):'N/A'}</div></div>
         <div><label>Professional Tax</label><div>${money(r.pt)}</div></div>
-        <div><label>TDS (${r.salarySnapshot.taxRegime==='old'?'Old':'New'} Regime, est.)</label><div>${money(r.tds)}</div></div>
+        <div><label>Regular TDS (${r.salarySnapshot.taxRegime==='old'?'Old':'New'} Regime, est.)</label><div>${money(r.regularTds)}</div></div>
+        ${bonus>0 ? `<div><label style="color:var(--accent);">Extra TDS on Bonus</label><div style="color:var(--accent);"><b>+${money(r.bonusTaxImpact)}</b></div></div>` : ''}
+        <div><label>Total TDS this month</label><div><b>${money(r.tds)}</b></div></div>
         <div><label>Net Pay</label><div><b>${money(r.netPay)}</b></div></div>
-      </div>`;
+      </div>
+      ${bonus>0 ? `<div class="hint" style="margin-top:6px;">The bonus is not annualised — the app compares annual tax with and without it, and charges the ₹${Math.round(r.bonusTaxImpact).toLocaleString('en-IN')} difference entirely in this month. Regular TDS in other months is unaffected.</div>` : ''}`;
   }
   document.getElementById('genEmp').addEventListener('change', preview);
   document.getElementById('genPeriod').addEventListener('change', preview);
+  document.getElementById('genBonus').addEventListener('input', preview);
   preview();
   document.getElementById('genConfirm').onclick = async ()=>{
     const emp = EMPLOYEES.find(x=>x.id===document.getElementById('genEmp').value);
     const period = document.getElementById('genPeriod').value;
-    const r = computePayslip(emp, period);
+    const bonus = Number(document.getElementById('genBonus').value)||0;
+    const r = computePayslip(emp, period, bonus);
     const record = {
       id:uid(), empId:emp.id, empName:emp.name, empCode:emp.empCode, designation:emp.designation,
       department:emp.department, grade:emp.grade, location:emp.location, division:emp.division,
@@ -1142,7 +1198,8 @@ function openGeneratePayslip(){
       bankAccNo:emp.bankAccNo, bankName:emp.bankName, ifsc:emp.ifsc, period,
       basic:r.salarySnapshot.basic, hra:r.salarySnapshot.hra, childrenEducation:r.salarySnapshot.childrenEducation,
       otherAllowance:r.salarySnapshot.otherAllowance, lta:r.salarySnapshot.lta,
-      gross:r.gross, pfEmployee:r.pfEmployee, pfEmployer:r.pfEmployer, esi:r.esi, pt:r.pt, tds:r.tds,
+      gross:r.gross, bonus:r.bonus, pfEmployee:r.pfEmployee, pfEmployer:r.pfEmployer, esi:r.esi, pt:r.pt, tds:r.tds,
+      regularTds:r.regularTds, bonusTaxImpact:r.bonusTaxImpact,
       totalDeductions:r.totalDeductions, netPay:r.netPay, reimbursement:r.reimbursement, ctc:r.ctc,
       taxRegime:r.salarySnapshot.taxRegime, taxableAnnual:r.taxableAnnual,
       generatedAt: new Date().toISOString()
@@ -1193,9 +1250,11 @@ function openPayslipView(payslipId){
           <tr><td class="lbl">HRA</td><td class="val amtcell">${money2(p.hra)}</td><td class="lbl">PROFESSIONAL TAX</td><td class="val amtcell">${money2(p.pt)}</td></tr>
           <tr><td class="lbl">OTHER ALLOWANCE</td><td class="val amtcell">${money2(p.otherAllowance)}</td><td class="lbl">INCOME TAX (TDS)</td><td class="val amtcell">${money2(p.tds)}</td></tr>
           <tr><td class="lbl">LTA</td><td class="val amtcell">${money2(p.lta)}</td><td class="lbl">WITHHELD</td><td class="val amtcell">-</td></tr>
-          <tr class="totrow"><td>GROSS EARNING</td><td class="amtcell">${money2(p.gross)}</td><td>TOTAL DEDUCTION</td><td class="amtcell">${money2(p.totalDeductions)}</td></tr>
+          ${p.bonus ? `<tr><td class="lbl">EX-GRATIA BONUS</td><td class="val amtcell">${money2(p.bonus)}</td><td class="lbl"></td><td class="val amtcell"></td></tr>` : ''}
+          <tr class="totrow"><td>GROSS EARNING</td><td class="amtcell">${money2(p.gross+(p.bonus||0))}</td><td>TOTAL DEDUCTION</td><td class="amtcell">${money2(p.totalDeductions)}</td></tr>
           <tr class="netrow"><td colspan="2">NET SALARY</td><td colspan="2" class="amtcell">${money2(p.netPay)}</td></tr>
           <tr class="wordsrow"><td colspan="4"><span class="wlabel">Net Salary (in words):</span> ${esc(rupeesInWords(p.netPay))}</td></tr>
+          ${p.bonus ? `<tr class="wordsrow"><td colspan="4"><span class="wlabel">TDS breakdown:</span> ${money2(p.regularTds)} regular + ${money2(p.bonusTaxImpact)} on this month's ex-gratia bonus (not annualised — the difference between annual tax with and without the bonus, charged in full this month; other months are unaffected).</td></tr>` : ''}
         </table>
         <div class="payslip-foot">
           <span>Paid Through Bank Transfer${bankLine ? ' — ' + esc(bankLine) : ''}</span>
@@ -1348,7 +1407,7 @@ function viewComplianceRecord(empId, recId){
 /* Uses Google Identity Services (OAuth) + Drive API v3 + Sheets API v4 directly via fetch —
    no server needed, works fine from a static GitHub Pages site. Scope is drive.file, so the
    app can only see/edit the files and folders it creates itself, never your whole Drive. */
-let gisTokenClient = null, driveAccessToken = null, driveTokenExpiry = 0;
+let gisTokenClient = null, driveAccessToken = null, driveTokenExpiry = 0, driveLastError = null;
 let driveSyncTimer = null, driveAutoInterval = null, driveBusy = false, driveReconnecting = false;
 
 function driveConnected(){ return !!(driveAccessToken && Date.now() < driveTokenExpiry); }
@@ -1386,6 +1445,7 @@ async function disconnectDrive(){
   ORG.gdrive.connected = false; await saveOrg();
   if(driveAutoInterval){ clearInterval(driveAutoInterval); driveAutoInterval = null; }
   toast('Disconnected from Google Drive.');
+  updateDriveStatusUI();
   if(activeTab==='settings') renderSettings(document.getElementById('content'), document.getElementById('tabActions'));
 }
 /* Called once on app load in every window/tab: if this browser previously connected Drive
@@ -1409,10 +1469,16 @@ function attemptSilentDriveReconnect(){
 }
 async function driveFetch(url, opts){
   opts = opts || {};
-  if(!driveConnected()) throw new Error('not-connected');
+  if(!driveConnected()) throw new Error('Not connected to Google Drive');
   opts.headers = Object.assign({}, opts.headers, { Authorization: 'Bearer '+driveAccessToken });
   const res = await fetch(url, opts);
-  if(res.status===401){ driveAccessToken=null; throw new Error('token-expired'); }
+  if(res.status===401){ driveAccessToken=null; throw new Error('Google Drive session expired — reconnect in Settings'); }
+  if(!res.ok){
+    let detail = '';
+    try{ const body = await res.clone().json(); detail = (body && body.error && body.error.message) || ''; }catch(e){}
+    driveLastError = `${res.status}${detail?': '+detail:''}`;
+    throw new Error(`Drive/Sheets request failed (${res.status})${detail?': '+detail:''}`);
+  }
   return res;
 }
 async function driveFindOrCreateFolder(name, parentId){
@@ -1458,7 +1524,7 @@ function scheduleDriveSync(){
 }
 function startAutoSyncLoop(){
   if(driveAutoInterval) return;
-  driveAutoInterval = setInterval(()=>{ if(ORG.gdrive && ORG.gdrive.connected) driveSyncNow(); }, 20000);
+  driveAutoInterval = setInterval(()=>{ if(ORG.gdrive && ORG.gdrive.connected) driveSyncNow(); updateDriveStatusUI(); }, 20000);
 }
 async function driveSyncNow(){
   if(!driveConnected() || driveBusy || !ORG.gdrive.connected) return;
@@ -1466,16 +1532,30 @@ async function driveSyncNow(){
   try{
     if(!ORG.gdrive.folderId) await driveSetup();
     const result = await driveUploadJson('data.json', ORG.gdrive.folderId, buildPayload(), ORG.gdrive.fileId);
-    if(result && result.id){ ORG.gdrive.fileId = result.id; ORG.gdrive.lastSynced = new Date().toISOString(); await saveOrgSilent(); updateDriveStatusUI(); }
-    try{ await driveExportSheet(true); }catch(e){ /* sheet sync is best-effort; json is the source of truth */ }
-  }catch(e){ /* silent — retried on next 20s tick */ }
+    if(result && result.id){ ORG.gdrive.fileId = result.id; ORG.gdrive.lastSynced = new Date().toISOString(); driveLastError = null; await saveOrgSilent(); }
+    try{ await driveExportSheet(true); driveLastError = null; }
+    catch(e){ driveLastError = e.message; console.warn('Sheet sync failed:', e.message); }
+  }catch(e){ driveLastError = e.message; console.warn('Drive sync failed:', e.message); }
   driveBusy = false;
+  updateDriveStatusUI();
 }
 function updateDriveStatusUI(){
   const el = document.getElementById('driveLastSync');
-  if(!el) return;
-  if(driveReconnecting){ el.textContent = 'Reconnecting to Google Drive…'; return; }
-  el.textContent = ORG.gdrive.lastSynced ? ('Last synced ' + new Date(ORG.gdrive.lastSynced).toLocaleString('en-IN') + ' · auto-syncs every 20s') : 'Not yet synced';
+  if(el){
+    if(driveReconnecting) el.textContent = 'Reconnecting to Google Drive…';
+    else if(driveLastError) el.innerHTML = `<span style="color:var(--bad);">Last sync failed: ${esc(driveLastError)}</span>`;
+    else el.textContent = ORG.gdrive.lastSynced ? ('Last synced ' + new Date(ORG.gdrive.lastSynced).toLocaleString('en-IN') + ' · auto-syncs every 20s') : 'Not yet synced';
+  }
+  const badge = document.getElementById('navDriveBadge');
+  if(badge){
+    if(!ORG.gdrive || !ORG.gdrive.connected) badge.innerHTML = '';
+    else if(driveReconnecting) badge.innerHTML = `<span class="pill">🔄 Reconnecting…</span>`;
+    else if(!driveConnected()) badge.innerHTML = `<span class="pill bad" style="cursor:pointer;" id="navDriveReconnect">⚠ Drive disconnected — click to reconnect</span>`;
+    else if(driveLastError) badge.innerHTML = `<span class="pill bad" title="${esc(driveLastError)}">⚠ Sync error</span>`;
+    else badge.innerHTML = `<span class="pill good">☁ Synced ${ORG.gdrive.lastSynced?timeAgo(ORG.gdrive.lastSynced):''}</span>`;
+    const reconnectEl = document.getElementById('navDriveReconnect');
+    if(reconnectEl) reconnectEl.onclick = connectDrive;
+  }
 }
 async function driveListBackups(){
   if(!driveConnected() || !ORG.gdrive.backupsFolderId) return [];
@@ -1497,7 +1577,7 @@ async function driveBackupNow(){
     await driveTrimBackups();
     toast('Backup saved to Google Drive (keeping latest 5).');
     if(activeTab==='settings') renderSettings(document.getElementById('content'), document.getElementById('tabActions'));
-  }catch(e){ toast('Backup failed — try reconnecting Google Drive.', true); }
+  }catch(e){ toast('Backup failed: '+e.message, true); }
 }
 async function driveRestoreBackup(fileId, label){
   openModal(`
@@ -1565,8 +1645,8 @@ async function driveExportSheet(silent){
     const salRows = [['Employee ID','Name','Effective From','Basic','HRA','Children Education','Other Allowance','LTA','Reimbursement','Tax Regime','Rent Paid (annual)','Metro City','80C Declared','80D Declared','Other Exemptions','Revised At','Reason']];
     EMPLOYEES.forEach(e=> (e.salaryHistory||[]).forEach(h=> salRows.push([e.empCode,e.name,h.effectiveFrom,h.basic,h.hra,h.childrenEducation,h.otherAllowance,h.lta,h.reimbursement,h.taxRegime,h.rentPaidAnnual,h.metroCity?'Metro':'Non-Metro',h.declared80C,h.declared80D,h.otherExemptions,h.revisedAt,h.reason])));
 
-    const slipRows = [['Employee','Employee ID','Period','Department','Gross','Total Deductions','Net Pay','Tax Regime','Bank Account No.','Generated At']]
-      .concat(PAYSLIPS.map(p=>[p.empName,p.empCode,p.period,p.department,p.gross,p.totalDeductions,p.netPay,p.taxRegime,p.bankAccNo,p.generatedAt]));
+    const slipRows = [['Employee','Employee ID','Period','Department','Gross','Bonus','Regular TDS','Extra TDS on Bonus','Total Deductions','Net Pay','Tax Regime','Bank Account No.','Generated At']]
+      .concat(PAYSLIPS.map(p=>[p.empName,p.empCode,p.period,p.department,p.gross,p.bonus||0,p.regularTds!=null?p.regularTds:p.tds,p.bonusTaxImpact||0,p.totalDeductions,p.netPay,p.taxRegime,p.bankAccNo,p.generatedAt]));
 
     const compRows = [['Employee','Employee ID','Type','Period','Date','Reference No.','Amount','Remarks','Files Attached']];
     Object.keys(COMPLIANCE||{}).forEach(empId=>{
@@ -1580,7 +1660,7 @@ async function driveExportSheet(silent){
     await driveWriteSheetTab(sheetId, 'Compliance', compRows);
 
     if(!silent){ toast('Google Sheet updated — Employees, Salary History, Payslips & Compliance tabs.'); if(activeTab==='settings') renderSettings(document.getElementById('content'), document.getElementById('tabActions')); }
-  }catch(e){ if(!silent) toast('Sheet export failed.', true); throw e; }
+  }catch(e){ driveLastError = e.message; if(!silent) toast('Sheet sync failed: '+e.message, true); throw e; }
 }
 
 /* ============================= MULTI-STAFF SYNC SAFETY ============================= */
