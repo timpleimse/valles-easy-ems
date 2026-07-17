@@ -311,7 +311,12 @@ const DEFAULT_ORG = {
     surcharge: [[5000000,0.10],[10000000,0.15],[20000000,0.25],[50000000,0.37]]
   },
   adminPasswordHash: "", employeeSeq: 1,
-  gdrive: { clientId:'870827159813-4g2i299mv9qduqpmju40mpr5f63uvgns.apps.googleusercontent.com', connected:false, folderId:null, fileId:null, backupsFolderId:null, sheetId:null, lastSynced:null, email:'' }
+  gdrive: { clientId:'870827159813-4g2i299mv9qduqpmju40mpr5f63uvgns.apps.googleusercontent.com', connected:false, folderId:null, fileId:null, backupsFolderId:null, sheetId:null, lastSynced:null, email:'',
+    /* Pinned IDs: when set, every device uses these exact Drive resources directly — no
+       search, no chance of a fresh device ever spinning up a duplicate folder/sheet. Leave
+       blank to fall back to find-or-create-by-name (fine for a single device; pin these once
+       multiple devices/staff are in use — see Settings → Google Drive Backup & Sync). */
+    pinnedFolderId:'10_P1yzf1Rz0JGELrkicdtv8nlhC68S_N', pinnedSheetId:'1Gx8KHwh1hgHHvga5L0-aT69WGfbFGktXw1Jw1c--PU0' }
 };
 
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,8); }
@@ -384,6 +389,8 @@ async function loadAll(){
   ORG = await getJSON('org-profile', null);
   if(!ORG){ ORG = JSON.parse(JSON.stringify(DEFAULT_ORG)); }
   if(!ORG.gdrive) ORG.gdrive = JSON.parse(JSON.stringify(DEFAULT_ORG.gdrive));
+  if(ORG.gdrive.pinnedFolderId===undefined) ORG.gdrive.pinnedFolderId = '';
+  if(ORG.gdrive.pinnedSheetId===undefined) ORG.gdrive.pinnedSheetId = '';
   if(!ORG.ctcPolicy) ORG.ctcPolicy = JSON.parse(JSON.stringify(DEFAULT_ORG.ctcPolicy));
   if(!ORG.taxNew) ORG.taxNew = JSON.parse(JSON.stringify(DEFAULT_ORG.taxNew));
   if(!ORG.taxOld) ORG.taxOld = JSON.parse(JSON.stringify(DEFAULT_ORG.taxOld));
@@ -1494,6 +1501,12 @@ async function driveFindOrCreateFolder(name, parentId){
   return cdata.id;
 }
 async function driveSetup(){
+  if(ORG.gdrive.pinnedFolderId){
+    ORG.gdrive.folderId = ORG.gdrive.pinnedFolderId;
+    ORG.gdrive.backupsFolderId = await driveFindOrCreateFolder('Backups', ORG.gdrive.pinnedFolderId);
+    await saveOrgSilent();
+    return;
+  }
   const rootId = await driveFindOrCreateFolder('Valles EASY EMS Data', null);
   ORG.gdrive.folderId = rootId;
   ORG.gdrive.backupsFolderId = await driveFindOrCreateFolder('Backups', rootId);
@@ -1602,11 +1615,16 @@ async function driveRestoreBackup(fileId, label){
 }
 const SHEET_TABS = ['Employees','Salary History','Payslips','Compliance'];
 async function driveEnsureSheet(){
-  let sheetId = ORG.gdrive.sheetId;
+  let sheetId = ORG.gdrive.pinnedSheetId || ORG.gdrive.sheetId;
   if(sheetId){
-    // confirm it still exists / is reachable; a stale id (e.g. deleted by hand) falls through to recreate
+    // confirm it still exists / is reachable; a stale UN-pinned id falls through to search/recreate,
+    // but a pinned id that's gone missing throws instead — pinning exists to guarantee determinism,
+    // so silently creating a replacement (which would then be un-pinned) defeats the point.
     try{ const chk = await driveFetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=spreadsheetId,sheets.properties.title`);
-      if(!chk.ok) sheetId = null; else {
+      if(!chk.ok){
+        if(ORG.gdrive.pinnedSheetId) throw new Error('Pinned Google Sheet ID is not reachable — check it in Settings');
+        sheetId = null;
+      } else {
         const meta = await chk.json();
         const have = (meta.sheets||[]).map(s=>s.properties.title);
         const missing = SHEET_TABS.filter(t=>!have.includes(t));
@@ -1615,17 +1633,40 @@ async function driveEnsureSheet(){
             body: JSON.stringify({ requests: missing.map(title=>({ addSheet:{ properties:{title} } })) }) });
         }
       }
-    }catch(e){ sheetId = null; }
+    }catch(e){ if(ORG.gdrive.pinnedSheetId) throw e; sheetId = null; }
+  }
+  const sheetTitle = (ORG.companyName||'Valles EASY EMS')+' — Live Data';
+  if(!sheetId){
+    /* This browser doesn't have a cached sheet ID — but another device may already have
+       created the sheet. Search the shared Drive folder by name first (same pattern as the
+       folder lookup) instead of assuming none exists, so every device converges on the same
+       spreadsheet rather than each spawning its own duplicate. */
+    if(!ORG.gdrive.folderId) await driveSetup();
+    const q = encodeURIComponent(`name='${sheetTitle.replace(/'/g,"\\'")}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false and '${ORG.gdrive.folderId}' in parents`);
+    const fres = await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`);
+    const fdata = await fres.json();
+    if(fdata.files && fdata.files.length){
+      sheetId = fdata.files[0].id;
+      // an existing sheet found this way may predate newer tabs — ensure they're all present
+      const chk2 = await driveFetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=sheets.properties.title`);
+      const meta2 = await chk2.json();
+      const have2 = (meta2.sheets||[]).map(s=>s.properties.title);
+      const missing2 = SHEET_TABS.filter(t=>!have2.includes(t));
+      if(missing2.length){
+        await driveFetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}:batchUpdate`, { method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ requests: missing2.map(title=>({ addSheet:{ properties:{title} } })) }) });
+      }
+    }
   }
   if(!sheetId){
     const cres = await driveFetch('https://sheets.googleapis.com/v4/spreadsheets', { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ properties:{title:(ORG.companyName||'Valles EASY EMS')+' — Live Data'}, sheets: SHEET_TABS.map(title=>({properties:{title}})) }) });
+      body: JSON.stringify({ properties:{title:sheetTitle}, sheets: SHEET_TABS.map(title=>({properties:{title}})) }) });
     const cdata = await cres.json();
-    sheetId = cdata.spreadsheetId; ORG.gdrive.sheetId = sheetId;
+    sheetId = cdata.spreadsheetId;
     if(!ORG.gdrive.folderId) await driveSetup();
     await driveFetch(`https://www.googleapis.com/drive/v3/files/${sheetId}?addParents=${ORG.gdrive.folderId}&fields=id`, {method:'PATCH'});
-    await saveOrgSilent();
   }
+  if(sheetId !== ORG.gdrive.sheetId){ ORG.gdrive.sheetId = sheetId; await saveOrgSilent(); }
   return sheetId;
 }
 async function driveWriteSheetTab(sheetId, tab, rows){
@@ -1957,10 +1998,26 @@ function renderSettings(c, actions){
           <button class="btn sm" id="driveBackupBtn">⬆ Backup Now to Drive</button>
           <button class="btn secondary sm" id="driveSheetBtn">📊 Sync Google Sheet Now</button>
           ${ORG.gdrive.sheetId ? `<a class="btn secondary sm" href="https://docs.google.com/spreadsheets/d/${ORG.gdrive.sheetId}/edit" target="_blank" rel="noopener">↗ Open Sheet</a>` : ''}
+          ${ORG.gdrive.folderId ? `<a class="btn secondary sm" href="https://drive.google.com/drive/folders/${ORG.gdrive.folderId}" target="_blank" rel="noopener">↗ Open Folder</a>` : ''}
         </div>
         <div class="section-label">Last 5 Backups in Drive</div>
         <div id="driveBackupList"><div class="empty" style="padding:12px;">Loading…</div></div>
       ` : `<div style="font-size:13px;color:var(--muted);">Not connected. Paste a Client ID and click Connect to begin.</div>`}
+    </div>
+
+    <div class="card">
+      <h2>Pin Drive Folder &amp; Sheet <span class="tag">recommended for multiple staff</span></h2>
+      <p style="color:var(--muted);font-size:13px;">Without this, a brand-new device figures out which folder/sheet to use by searching Drive for them by name — reliable, but not bulletproof (e.g. it breaks if the company name is ever changed, since the sheet's name would no longer match). <b>Pinning removes the guesswork entirely</b>: paste the exact IDs once here, and every device that has this Client ID configured uses those exact resources from the start, with zero risk of ever creating a duplicate. If this device is already connected and syncing correctly, just click "Use This Device's Current IDs" below, then copy the two values shown to every other device's Settings.</p>
+      <div class="grid cols-2">
+        <div class="field"><label>Pinned Drive Folder ID</label><input type="text" id="pinFolderId" placeholder="e.g. 1a2B3cD4EfGhIjKlmnOP" value="${esc(ORG.gdrive.pinnedFolderId||'')}"></div>
+        <div class="field"><label>Pinned Google Sheet ID</label><input type="text" id="pinSheetId" placeholder="e.g. 1XyZ...longId...789" value="${esc(ORG.gdrive.pinnedSheetId||'')}"></div>
+      </div>
+      <div class="btn-row">
+        ${driveConnected() && ORG.gdrive.folderId ? `<button class="btn secondary sm" id="usePinCurrent">Use This Device's Current IDs</button>` : ''}
+        <button class="btn sm" id="savePinIds">Save Pinned IDs</button>
+        <button class="btn danger sm" id="clearPinIds">Clear Pins</button>
+      </div>
+      <p class="hint">The IDs are also the long string in each resource's URL — e.g. in <code>drive.google.com/drive/folders/<b>THIS-PART</b></code> and <code>docs.google.com/spreadsheets/d/<b>THIS-PART</b>/edit</code>.</p>
     </div>
   `;
   document.getElementById('orgForm').onsubmit = async (ev)=>{
@@ -2076,6 +2133,25 @@ function renderSettings(c, actions){
   if(backupBtn) backupBtn.onclick = driveBackupNow;
   const sheetBtn = document.getElementById('driveSheetBtn');
   if(sheetBtn) sheetBtn.onclick = ()=> driveExportSheet(false);
+  const useCurrentBtn = document.getElementById('usePinCurrent');
+  if(useCurrentBtn) useCurrentBtn.onclick = ()=>{
+    document.getElementById('pinFolderId').value = ORG.gdrive.folderId||'';
+    document.getElementById('pinSheetId').value = ORG.gdrive.sheetId||'';
+    toast("Copied this device's current IDs into the fields below — click Save Pinned IDs, then copy them to your other devices.");
+  };
+  const savePinBtn = document.getElementById('savePinIds');
+  if(savePinBtn) savePinBtn.onclick = async ()=>{
+    ORG.gdrive.pinnedFolderId = document.getElementById('pinFolderId').value.trim();
+    ORG.gdrive.pinnedSheetId = document.getElementById('pinSheetId').value.trim();
+    await saveOrg(); toast('Pinned IDs saved. Next sync will use them directly.');
+    driveSyncNow();
+  };
+  const clearPinBtn = document.getElementById('clearPinIds');
+  if(clearPinBtn) clearPinBtn.onclick = async ()=>{
+    ORG.gdrive.pinnedFolderId = ''; ORG.gdrive.pinnedSheetId = '';
+    document.getElementById('pinFolderId').value = ''; document.getElementById('pinSheetId').value = '';
+    await saveOrg(); toast('Pins cleared — back to find-or-create-by-name.');
+  };
   const backupListEl = document.getElementById('driveBackupList');
   if(backupListEl){
     driveListBackups().then(files=>{
