@@ -292,6 +292,23 @@ const DEFAULT_ORG = {
   bankName: "", bankAccNo: "", bankIFSC: "", bankBranch: "",
   ptSlabs: [ {min:0, max:15000, amount:0}, {min:15001, max:20000, amount:150}, {min:20001, max:1000000000, amount:200} ],
   applyPfCeiling: false, pfCeiling: 15000,
+  /* CTC structuring policy: given ONE CTC number, this is how the full monthly breakdown
+     is derived. See "Revise by CTC" in Salary Revision. Editable in Settings. */
+  ctcPolicy: { basicPct: 0.50, childrenEducation: 200, defaultReimbursement: 40000 },
+  /* Income-tax rules for both regimes — editable in Settings so HR can update them when the
+     government revises slabs/rates in a future Budget, without needing the app rebuilt.
+     Defaults below are the FY2025-26 rules this app shipped with. slabs: [cap, rate] pairs,
+     cap:null means "and above". surcharge: [incomeAbove, rate] tiers. */
+  taxNew: {
+    stdDeduction: 75000, rebateThreshold: 1200000, cess: 0.04,
+    slabs: [[400000,0],[800000,0.05],[1200000,0.10],[1600000,0.15],[2000000,0.20],[2400000,0.25],[null,0.30]],
+    surcharge: [[5000000,0.10],[10000000,0.15],[20000000,0.25]]
+  },
+  taxOld: {
+    stdDeduction: 50000, rebateThreshold: 500000, cess: 0.04,
+    slabs: [[250000,0],[500000,0.05],[1000000,0.20],[null,0.30]],
+    surcharge: [[5000000,0.10],[10000000,0.15],[20000000,0.25],[50000000,0.37]]
+  },
   adminPasswordHash: "", employeeSeq: 1,
   gdrive: { clientId:'870827159813-4g2i299mv9qduqpmju40mpr5f63uvgns.apps.googleusercontent.com', connected:false, folderId:null, fileId:null, backupsFolderId:null, sheetId:null, lastSynced:null, email:'' }
 };
@@ -366,6 +383,9 @@ async function loadAll(){
   ORG = await getJSON('org-profile', null);
   if(!ORG){ ORG = JSON.parse(JSON.stringify(DEFAULT_ORG)); }
   if(!ORG.gdrive) ORG.gdrive = JSON.parse(JSON.stringify(DEFAULT_ORG.gdrive));
+  if(!ORG.ctcPolicy) ORG.ctcPolicy = JSON.parse(JSON.stringify(DEFAULT_ORG.ctcPolicy));
+  if(!ORG.taxNew) ORG.taxNew = JSON.parse(JSON.stringify(DEFAULT_ORG.taxNew));
+  if(!ORG.taxOld) ORG.taxOld = JSON.parse(JSON.stringify(DEFAULT_ORG.taxOld));
   EMPLOYEES = await getJSON('employees', []);
   // migrate legacy records that still have a flat `salary` object instead of salaryHistory
   EMPLOYEES.forEach(e=>{
@@ -659,7 +679,40 @@ async function submitEmployeeForm(ev, isEdit, e){
     closeModal(); toast(isEdit?'Employee updated.':'Employee added.'); render();
 }
 
+/* ============================= CTC-DRIVEN SALARY STRUCTURING ============================= */
+/* Given a single CTC figure, derives the full monthly breakdown per Settings → CTC Structuring
+   Policy: Basic = basicPct × CTC; HRA = 50% of Basic; Children Education is a fixed monthly
+   amount; LTA = Basic ÷ 12; PF Employee & PF Employer are each 12% of Basic (respecting the
+   EPF wage ceiling if enabled); Professional Tax follows the configured slabs; Other Allowance
+   is the balancing figure so everything reconciles exactly back to the CTC entered. PT depends
+   on gross and gross depends on PT, so this iterates a couple of times to converge (it always
+   does — PT only takes a handful of discrete values). */
+function deriveFromCTC(ctc, reimbursement){
+  const pol = ORG.ctcPolicy;
+  const basic = ctc * pol.basicPct;
+  const hra = basic * 0.5;
+  const childrenEducation = pol.childrenEducation;
+  const lta = basic / 12;
+  const basicForPf = ORG.applyPfCeiling ? Math.min(basic, ORG.pfCeiling||15000) : basic;
+  const pfEmployee = Math.round(basicForPf*0.12);
+  const pfEmployer = pfEmployee;
+  let pt = ptFor(ctc); // seed with a reasonable guess
+  let gross=0, otherAllowance=0;
+  for(let i=0;i<4;i++){
+    gross = ctc - pfEmployee - pfEmployer - pt - reimbursement;
+    otherAllowance = gross - basic - hra - childrenEducation - lta;
+    const nextPt = ptFor(gross);
+    if(nextPt===pt) break;
+    pt = nextPt;
+  }
+  return { basic, hra, childrenEducation, lta, otherAllowance, pfEmployee, pfEmployer, pt, reimbursement, gross,
+    ctcCheck: gross+pfEmployee+pfEmployer+pt+reimbursement };
+}
+
 function salaryFieldsHtml(s){
+  return componentFieldsHtml(s) + regimeFieldsHtml(s);
+}
+function componentFieldsHtml(s){
   return `
     <div class="grid cols-4">
       <div class="field"><label>Basic (monthly)</label><input type="number" min="0" step="0.01" name="basic" value="${s.basic||0}"></div>
@@ -670,6 +723,12 @@ function salaryFieldsHtml(s){
     <div class="grid cols-4">
       <div class="field"><label>LTA (monthly)</label><input type="number" min="0" step="0.01" name="lta" value="${s.lta||0}"></div>
       <div class="field"><label>Reimbursement (non-taxable, monthly)</label><input type="number" min="0" step="0.01" name="reimbursement" value="${s.reimbursement||0}"></div>
+    </div>
+  `;
+}
+function regimeFieldsHtml(s){
+  return `
+    <div class="grid cols-4">
       <div class="field"><label>Tax Regime</label><select name="taxRegime" class="regimeSel">
         <option value="new" ${s.taxRegime!=='old'?'selected':''}>New Regime</option>
         <option value="old" ${s.taxRegime==='old'?'selected':''}>Old Regime</option>
@@ -767,6 +826,7 @@ function openReviseSalary(empId){
   const s = currentSalary(e);
   const nextMonth = new Date().toISOString().slice(0,7);
   const baseRev = Number(e._rev)||0;
+  const currentCtc = grossOf(s) + (s.basic?Math.round((ORG.applyPfCeiling?Math.min(s.basic,ORG.pfCeiling||15000):s.basic)*0.12):0) + ptFor(grossOf(s)) + (s.reimbursement||0);
   openModal(`
     <div class="modal-head"><h3>Revise Salary — ${esc(e.name)}</h3><button class="modal-close" id="mClose">✕</button></div>
     <form id="reviseForm">
@@ -774,7 +834,24 @@ function openReviseSalary(empId){
         <div class="field"><label>Effective From (month)</label><input type="month" name="effectiveFrom" value="${nextMonth}" required></div>
         <div class="field"><label>Reason for Revision</label><input type="text" name="reason" placeholder="e.g. Annual increment FY26-27"></div>
       </div>
-      ${salaryFieldsHtml(s)}
+      <div class="btn-row" style="margin:-4px 0 14px;">
+        <button type="button" class="btn sm" id="modeCtc">By CTC (auto-calculate)</button>
+        <button type="button" class="btn secondary sm" id="modeComponent">By Component (manual)</button>
+      </div>
+
+      <div id="ctcModeBlock">
+        <div class="grid cols-3">
+          <div class="field"><label>New CTC (₹/month)</label><input type="number" min="0" step="0.01" id="ctcInput" value="${Math.round(currentCtc)}"></div>
+          <div class="field"><label>Reimbursement (₹/month)</label><input type="number" min="0" step="0.01" id="ctcReimb" value="${s.reimbursement||ORG.ctcPolicy.defaultReimbursement}"></div>
+          <div class="field"><label>Basic (% of CTC)</label><input type="number" min="1" max="99" step="0.01" id="ctcBasicPct" value="${(ORG.ctcPolicy.basicPct*100).toFixed(2)}"></div>
+        </div>
+        <div id="ctcPreview"></div>
+      </div>
+      <div id="componentModeBlock" style="display:none;">
+        ${componentFieldsHtml(s)}
+      </div>
+      ${regimeFieldsHtml(s)}
+
       <div class="hint">This creates a new dated entry in the salary history — the previous structure is preserved for audit and for regenerating past payslips accurately.</div>
       <div class="divider"></div>
       <div class="btn-row">
@@ -785,22 +862,84 @@ function openReviseSalary(empId){
   `, true);
   document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
   wireRegimeToggle(document.getElementById('reviseForm'));
+
+  let mode = 'ctc';
+  function setMode(m){
+    mode = m;
+    document.getElementById('ctcModeBlock').style.display = m==='ctc' ? 'block' : 'none';
+    document.getElementById('componentModeBlock').style.display = m==='ctc' ? 'none' : 'block';
+    document.getElementById('modeCtc').className = 'btn sm' + (m==='ctc' ? '' : ' secondary');
+    document.getElementById('modeComponent').className = 'btn sm' + (m==='component' ? '' : ' secondary');
+  }
+  document.getElementById('modeCtc').onclick = ()=> setMode('ctc');
+  document.getElementById('modeComponent').onclick = ()=> setMode('component');
+
+  function renderCtcPreview(){
+    const ctc = Number(document.getElementById('ctcInput').value)||0;
+    const reimb = Number(document.getElementById('ctcReimb').value)||0;
+    const pctField = document.getElementById('ctcBasicPct');
+    ORG.ctcPolicy = ORG.ctcPolicy; // (uses saved policy; pctField below can override just this revision)
+    const basicPct = Math.min(0.99, Math.max(0.01, (Number(pctField.value)||50)/100));
+    const savedPct = ORG.ctcPolicy.basicPct;
+    ORG.ctcPolicy.basicPct = basicPct; // temporarily override for the preview calc only
+    const r = deriveFromCTC(ctc, reimb);
+    ORG.ctcPolicy.basicPct = savedPct; // restore — this override is per-revision, not persisted to Settings
+    const negWarn = r.otherAllowance < 0;
+    document.getElementById('ctcPreview').innerHTML = `
+      <div class="divider"></div>
+      <div class="grid cols-4">
+        <div><label>Basic</label><div><b>${money2(r.basic)}</b></div></div>
+        <div><label>HRA (50%)</label><div><b>${money2(r.hra)}</b></div></div>
+        <div><label>Children Education</label><div><b>${money2(r.childrenEducation)}</b></div></div>
+        <div><label>LTA (Basic ÷ 12)</label><div><b>${money2(r.lta)}</b></div></div>
+        <div><label style="${negWarn?'color:var(--bad);':''}">Other Allowance</label><div><b style="${negWarn?'color:var(--bad);':''}">${money2(r.otherAllowance)}</b></div></div>
+        <div><label>PF Employee (12%)</label><div><b>${money2(r.pfEmployee)}</b></div></div>
+        <div><label>PF Employer (12%)</label><div><b>${money2(r.pfEmployer)}</b></div></div>
+        <div><label>Professional Tax</label><div><b>${money2(r.pt)}</b></div></div>
+        <div><label>Reimbursement</label><div><b>${money2(r.reimbursement)}</b></div></div>
+        <div><label>Gross Salary</label><div><b>${money2(r.gross)}</b></div></div>
+        <div><label>CTC (check)</label><div><b>${money2(r.ctcCheck)}</b></div></div>
+      </div>
+      ${negWarn ? `<div class="hint" style="color:var(--bad);margin-top:8px;">⚠ Other Allowance is negative — this CTC is too low for the current Reimbursement and Basic % to fit. Lower the Reimbursement, lower the Basic %, or raise the CTC.</div>` : ''}
+    `;
+  }
+  ['ctcInput','ctcReimb','ctcBasicPct'].forEach(id=> document.getElementById(id).addEventListener('input', renderCtcPreview));
+  renderCtcPreview();
+
   document.getElementById('reviseForm').onsubmit = async (ev)=>{
     ev.preventDefault();
     const conflict = await checkRecordConflict('employees', empId, baseRev);
     if(conflict){
       conflictWarning(conflict._updatedBy, conflict._updatedAt,
         ()=>{ const idx = EMPLOYEES.findIndex(x=>x.id===empId); if(idx>-1) EMPLOYEES[idx]=conflict; openReviseSalary(empId); },
-        ()=> submitReviseSalary(ev, empId));
+        ()=> submitReviseSalary(ev, empId, mode));
       return;
     }
-    await submitReviseSalary(ev, empId);
+    await submitReviseSalary(ev, empId, mode);
   };
 }
-async function submitReviseSalary(ev, empId){
+async function submitReviseSalary(ev, empId, mode){
     const e = EMPLOYEES.find(x=>x.id===empId); if(!e) return;
     const fd = new FormData(ev.target);
-    const entry = { id: uid(), effectiveFrom: fd.get('effectiveFrom'), reason: fd.get('reason').trim(), revisedAt: new Date().toISOString(), ...readSalaryFields(fd) };
+    let salaryFields;
+    if(mode==='ctc'){
+      const ctc = Number(document.getElementById('ctcInput').value)||0;
+      const reimb = Number(document.getElementById('ctcReimb').value)||0;
+      const basicPct = Math.min(0.99, Math.max(0.01, (Number(document.getElementById('ctcBasicPct').value)||50)/100));
+      const savedPct = ORG.ctcPolicy.basicPct; ORG.ctcPolicy.basicPct = basicPct;
+      const r = deriveFromCTC(ctc, reimb);
+      ORG.ctcPolicy.basicPct = savedPct;
+      if(r.otherAllowance < 0){ toast('Cannot save — Other Allowance is negative. Adjust CTC, Reimbursement or Basic %.', true); return; }
+      salaryFields = {
+        basic:r.basic, hra:r.hra, childrenEducation:r.childrenEducation, otherAllowance:r.otherAllowance, lta:r.lta, reimbursement:r.reimbursement,
+        taxRegime: fd.get('taxRegime')||'new', rentPaidAnnual:Number(fd.get('rentPaidAnnual'))||0, metroCity: fd.get('metroCity')==='true',
+        declared80C:Number(fd.get('declared80C'))||0, declared80D:Number(fd.get('declared80D'))||0, otherExemptions:Number(fd.get('otherExemptions'))||0,
+        ctcInput: ctc, basicPctUsed: basicPct
+      };
+    } else {
+      salaryFields = readSalaryFields(fd);
+    }
+    const entry = { id: uid(), effectiveFrom: fd.get('effectiveFrom'), reason: fd.get('reason').trim(), revisedAt: new Date().toISOString(), ...salaryFields };
     e.salaryHistory.push(entry);
     tagRecord(e, false);
     await saveEmployees();
@@ -811,37 +950,27 @@ async function submitReviseSalary(ev, empId){
 /* ============================= TAX / STATUTORY ENGINE ============================= */
 function ptFor(gross){ const slab = (ORG.ptSlabs||[]).find(s => gross>=s.min && gross<=s.max); return slab ? slab.amount : 0; }
 
-function surchargeRateNew(taxableAnnual){
-  if(taxableAnnual>20000000) return 0.25;
-  if(taxableAnnual>10000000) return 0.15;
-  if(taxableAnnual>5000000) return 0.10;
-  return 0;
+function surchargeRateFor(taxableAnnual, tiers){
+  let rate = 0;
+  (tiers||[]).slice().sort((a,b)=>a[0]-b[0]).forEach(([threshold,r])=>{ if(taxableAnnual>threshold) rate = r; });
+  return rate;
 }
-function surchargeRateOld(taxableAnnual){
-  if(taxableAnnual>50000000) return 0.37;
-  if(taxableAnnual>20000000) return 0.25;
-  if(taxableAnnual>10000000) return 0.15;
-  if(taxableAnnual>5000000) return 0.10;
-  return 0;
-}
-function newRegimeAnnualTax(taxableAnnual){
-  if(taxableAnnual<=1200000) return {tax:0,surcharge:0,cess:0,total:0};
-  const brackets=[[400000,0],[800000,.05],[1200000,.10],[1600000,.15],[2000000,.20],[2400000,.25],[Infinity,.30]];
+/* Generic slab-tax computer, driven entirely by ORG.taxNew / ORG.taxOld — see Settings →
+   Income Tax Rules. Editing those there re-shapes this calculation with no code change,
+   for when a future Budget revises slabs, rebate thresholds, cess, or surcharge tiers. */
+function regimeAnnualTax(taxableAnnual, rules){
+  if(taxableAnnual<=(rules.rebateThreshold||0)) return {tax:0,surcharge:0,cess:0,total:0};
   let tax=0, prev=0;
-  for(const [cap,rate] of brackets){ if(taxableAnnual>prev){ tax += (Math.min(taxableAnnual,cap)-prev)*rate; prev=cap; } else break; }
-  const surcharge = tax*surchargeRateNew(taxableAnnual);
-  const cess = (tax+surcharge)*0.04;
+  (rules.slabs||[]).forEach(([cap,rate])=>{
+    const capVal = (cap===null||cap===undefined) ? Infinity : Number(cap);
+    if(taxableAnnual>prev){ tax += (Math.min(taxableAnnual,capVal)-prev)*rate; prev=capVal; }
+  });
+  const surcharge = tax*surchargeRateFor(taxableAnnual, rules.surcharge);
+  const cess = (tax+surcharge)*(rules.cess!=null?rules.cess:0.04);
   return {tax,surcharge,cess,total:tax+surcharge+cess};
 }
-function oldRegimeAnnualTax(taxableAnnual){
-  if(taxableAnnual<=500000) return {tax:0,surcharge:0,cess:0,total:0};
-  const brackets=[[250000,0],[500000,.05],[1000000,.20],[Infinity,.30]];
-  let tax=0, prev=0;
-  for(const [cap,rate] of brackets){ if(taxableAnnual>prev){ tax += (Math.min(taxableAnnual,cap)-prev)*rate; prev=cap; } else break; }
-  const surcharge = tax*surchargeRateOld(taxableAnnual);
-  const cess = (tax+surcharge)*0.04;
-  return {tax,surcharge,cess,total:tax+surcharge+cess};
-}
+function newRegimeAnnualTax(taxableAnnual){ return regimeAnnualTax(taxableAnnual, ORG.taxNew); }
+function oldRegimeAnnualTax(taxableAnnual){ return regimeAnnualTax(taxableAnnual, ORG.taxOld); }
 function hraExemptionAnnual(s){
   if(s.taxRegime!=='old') return 0;
   const hraAnnual = (s.hra||0)*12, basicAnnual=(s.basic||0)*12, rent=s.rentPaidAnnual||0;
@@ -863,10 +992,10 @@ function computePayslip(emp, period){
   if(s.taxRegime==='old'){
     const hraEx = hraExemptionAnnual(s);
     const cap80C = Math.min(s.declared80C||0, 150000);
-    taxableAnnual = Math.max(0, grossAnnual - 50000 - hraEx - cap80C - (s.declared80D||0) - (s.otherExemptions||0));
+    taxableAnnual = Math.max(0, grossAnnual - (ORG.taxOld.stdDeduction||50000) - hraEx - cap80C - (s.declared80D||0) - (s.otherExemptions||0));
     tdsAnnual = oldRegimeAnnualTax(taxableAnnual).total;
   } else {
-    taxableAnnual = Math.max(0, grossAnnual - 75000);
+    taxableAnnual = Math.max(0, grossAnnual - (ORG.taxNew.stdDeduction||75000));
     tdsAnnual = newRegimeAnnualTax(taxableAnnual).total;
   }
   const tds = Math.round(tdsAnnual/12);
@@ -1655,14 +1784,47 @@ function renderSettings(c, actions){
 
     <div class="card">
       <h2>Statutory Calculation Rules</h2>
-      <p style="color:var(--muted);font-size:13px;">EPF is 12% of Basic, ESI is 0.75% of gross (applicable up to ₹21,000 gross). TDS follows FY2025-26 slabs: <b>New Regime</b> — 0% to ₹4L, 5% to ₹8L, 10% to ₹12L, 15% to ₹16L, 20% to ₹20L, 25% to ₹24L, 30% above, nil tax up to ₹12L taxable via 87A rebate, standard deduction ₹75,000, plus surcharge and 4% cess. <b>Old Regime</b> — 0% to ₹2.5L, 5% to ₹5L, 20% to ₹10L, 30% above, nil up to ₹5L via 87A, standard deduction ₹50,000, HRA exemption and 80C/80D as declared per employee. These are estimates for reference — verify with your CA before filing. Professional Tax uses the slabs below — edit to match your state.</p>
+      <p style="color:var(--muted);font-size:13px;">EPF is 12% of Basic, ESI is 0.75% of gross (applicable up to ₹21,000 gross). Income tax slabs and rates for both regimes are fully editable below, so this stays accurate when the government revises them in a future Budget. Professional Tax uses the slabs below — edit to match your state. These are estimates for reference — verify with your CA before filing.</p>
       <div class="field">
         <label class="checkline"><input type="checkbox" id="pfCeilingChk" ${ORG.applyPfCeiling?'checked':''}> Apply EPF wage ceiling</label>
         <input type="number" id="pfCeilingVal" value="${ORG.pfCeiling||15000}" style="margin-top:6px;max-width:160px;">
       </div>
       <div class="section-label">Professional Tax Slabs (monthly gross, ₹)</div>
       <div id="ptSlabWrap"></div>
-      <div class="btn-row" style="margin-top:10px;"><button class="btn secondary sm" id="addSlab">+ Add Slab</button><button class="btn sm" id="saveRules">Save Rules</button></div>
+      <div class="btn-row" style="margin-top:10px;"><button class="btn secondary sm" id="addSlab">+ Add Slab</button><button class="btn sm" id="saveRules">Save Statutory Rules</button></div>
+    </div>
+
+    <div class="card">
+      <h2>Income Tax Rules <span class="tag">both regimes, editable</span></h2>
+      <p style="color:var(--muted);font-size:13px;">These are the exact rules the payslip tax engine uses. When a Budget changes slabs, thresholds, cess or surcharge, update them here — no code change needed. Slab rows are annual taxable-income brackets; leave the last row's "Up To" blank for "and above". Surcharge rows are annual-income thresholds above which that surcharge rate applies.</p>
+      ${['New','Old'].map(regime=>{
+        const key = 'tax'+regime, r = ORG[key];
+        return `
+        <div class="section-label" style="margin-top:${regime==='Old'?'18px':'6px'};">${regime} Regime</div>
+        <div class="grid cols-3">
+          <div class="field"><label>Standard Deduction (₹/yr)</label><input type="number" step="0.01" min="0" data-taxfield="${key}-stdDeduction" value="${r.stdDeduction}"></div>
+          <div class="field"><label>Rebate Threshold — nil tax up to (₹/yr)</label><input type="number" step="0.01" min="0" data-taxfield="${key}-rebateThreshold" value="${r.rebateThreshold}"></div>
+          <div class="field"><label>Cess (%)</label><input type="number" step="0.01" min="0" data-taxfield="${key}-cess" value="${(r.cess*100).toFixed(2)}"></div>
+        </div>
+        <div class="hint" style="margin:-4px 0 6px;">Tax Slabs (annual taxable income, ₹)</div>
+        <div data-slabwrap="${key}-slabs"></div>
+        <button type="button" class="btn secondary sm" data-addtaxslab="${key}">+ Add Slab</button>
+        <div class="hint" style="margin:14px 0 6px;">Surcharge Tiers (annual taxable income above, ₹)</div>
+        <div data-slabwrap="${key}-surcharge"></div>
+        <button type="button" class="btn secondary sm" data-addsurcharge="${key}">+ Add Surcharge Tier</button>
+      `; }).join('')}
+      <div class="btn-row" style="margin-top:14px;"><button class="btn sm" id="saveTaxRules">Save Income Tax Rules</button></div>
+    </div>
+
+    <div class="card">
+      <h2>CTC Structuring Policy</h2>
+      <p style="color:var(--muted);font-size:13px;">Governs how "Revise by CTC" turns a single Cost-to-Company figure into a full monthly breakdown: <b>Basic</b> is set as this % of CTC; <b>HRA</b> = 50% of Basic; <b>Children Education</b> is fixed; <b>LTA</b> = Basic ÷ 12; <b>PF Employee</b> and <b>PF Employer</b> are each 12% of Basic (or the capped wage, per the ceiling setting above); <b>Professional Tax</b> follows the slabs above; and <b>Other Allowance</b> is the balancing figure that makes everything reconcile exactly back to the CTC entered. This mirrors how your management structures pay — adjust the ratio to match company policy.</p>
+      <div class="grid cols-3">
+        <div class="field"><label>Basic as % of CTC</label><input type="number" step="0.01" min="1" max="99" id="basicPctField" value="${(ORG.ctcPolicy.basicPct*100).toFixed(2)}"></div>
+        <div class="field"><label>Children Education (₹/month, fixed)</label><input type="number" step="0.01" min="0" id="childEduField" value="${ORG.ctcPolicy.childrenEducation}"></div>
+        <div class="field"><label>Default Reimbursement (₹/month)</label><input type="number" step="0.01" min="0" id="defReimbField" value="${ORG.ctcPolicy.defaultReimbursement}"></div>
+      </div>
+      <div class="btn-row"><button class="btn sm" id="saveCtcPolicy">Save CTC Policy</button></div>
     </div>
 
     <div class="card">
@@ -1750,6 +1912,65 @@ function renderSettings(c, actions){
     ORG.applyPfCeiling = document.getElementById('pfCeilingChk').checked;
     ORG.pfCeiling = Number(document.getElementById('pfCeilingVal').value)||15000;
     await saveOrg(); toast('Statutory rules saved.');
+  };
+
+  /* ---- Income Tax Rules editor (slabs + surcharge tiers, per regime) ---- */
+  function drawTaxSlabs(key){
+    const wrap = document.querySelector(`[data-slabwrap="${key}-slabs"]`); if(!wrap) return;
+    wrap.innerHTML = ORG[key].slabs.map((pair,i)=>`
+      <div class="grid cols-3" style="align-items:end;margin-bottom:6px;">
+        <div class="field" style="margin-bottom:0;"><label>Up To (₹, blank = above)</label><input type="number" step="0.01" data-taxslab="${key}-${i}-cap" value="${pair[0]===null?'':pair[0]}"></div>
+        <div class="field" style="margin-bottom:0;"><label>Rate (%)</label><input type="number" step="0.01" data-taxslab="${key}-${i}-rate" value="${(pair[1]*100).toFixed(2)}"></div>
+        <div class="field" style="margin-bottom:0;"><button type="button" class="btn danger sm" data-rmtaxslab="${key}-${i}">✕ Remove</button></div>
+      </div>`).join('');
+    wrap.querySelectorAll('[data-rmtaxslab]').forEach(b=>{
+      b.onclick = ()=>{ const [k,idx] = [b.dataset.rmtaxslab.slice(0,b.dataset.rmtaxslab.lastIndexOf('-')), b.dataset.rmtaxslab.split('-').pop()]; ORG[k].slabs.splice(Number(idx),1); drawTaxSlabs(k); };
+    });
+  }
+  function drawSurcharge(key){
+    const wrap = document.querySelector(`[data-slabwrap="${key}-surcharge"]`); if(!wrap) return;
+    wrap.innerHTML = ORG[key].surcharge.map((pair,i)=>`
+      <div class="grid cols-3" style="align-items:end;margin-bottom:6px;">
+        <div class="field" style="margin-bottom:0;"><label>Income Above (₹)</label><input type="number" step="0.01" data-surtier="${key}-${i}-threshold" value="${pair[0]}"></div>
+        <div class="field" style="margin-bottom:0;"><label>Surcharge Rate (%)</label><input type="number" step="0.01" data-surtier="${key}-${i}-rate" value="${(pair[1]*100).toFixed(2)}"></div>
+        <div class="field" style="margin-bottom:0;"><button type="button" class="btn danger sm" data-rmsurtier="${key}-${i}">✕ Remove</button></div>
+      </div>`).join('');
+    wrap.querySelectorAll('[data-rmsurtier]').forEach(b=>{
+      b.onclick = ()=>{ const idx = b.dataset.rmsurtier.split('-').pop(); ORG[key].surcharge.splice(Number(idx),1); drawSurcharge(key); };
+    });
+  }
+  ['taxNew','taxOld'].forEach(k=>{ drawTaxSlabs(k); drawSurcharge(k); });
+  document.querySelectorAll('[data-addtaxslab]').forEach(b=> b.onclick = ()=>{ ORG[b.dataset.addtaxslab].slabs.push([null,0]); drawTaxSlabs(b.dataset.addtaxslab); });
+  document.querySelectorAll('[data-addsurcharge]').forEach(b=> b.onclick = ()=>{ ORG[b.dataset.addsurcharge].surcharge.push([0,0]); drawSurcharge(b.dataset.addsurcharge); });
+  document.getElementById('saveTaxRules').onclick = async ()=>{
+    ['taxNew','taxOld'].forEach(key=>{
+      const std = document.querySelector(`[data-taxfield="${key}-stdDeduction"]`);
+      const reb = document.querySelector(`[data-taxfield="${key}-rebateThreshold"]`);
+      const cs  = document.querySelector(`[data-taxfield="${key}-cess"]`);
+      if(std) ORG[key].stdDeduction = Number(std.value)||0;
+      if(reb) ORG[key].rebateThreshold = Number(reb.value)||0;
+      if(cs) ORG[key].cess = (Number(cs.value)||0)/100;
+      document.querySelectorAll(`[data-taxslab^="${key}-"]`).forEach(inp=>{
+        const parts = inp.dataset.taxslab.split('-'); const idx = Number(parts[1]); const field = parts[2];
+        const v = inp.value.trim();
+        if(field==='cap') ORG[key].slabs[idx][0] = v==='' ? null : Number(v);
+        else ORG[key].slabs[idx][1] = (Number(v)||0)/100;
+      });
+      document.querySelectorAll(`[data-surtier^="${key}-"]`).forEach(inp=>{
+        const parts = inp.dataset.surtier.split('-'); const idx = Number(parts[1]); const field = parts[2];
+        if(field==='threshold') ORG[key].surcharge[idx][0] = Number(inp.value)||0;
+        else ORG[key].surcharge[idx][1] = (Number(inp.value)||0)/100;
+      });
+    });
+    await saveOrg(); toast('Income tax rules saved.');
+  };
+
+  const saveCtcBtn = document.getElementById('saveCtcPolicy');
+  if(saveCtcBtn) saveCtcBtn.onclick = async ()=>{
+    ORG.ctcPolicy.basicPct = Math.min(0.99, Math.max(0.01, (Number(document.getElementById('basicPctField').value)||50)/100));
+    ORG.ctcPolicy.childrenEducation = Number(document.getElementById('childEduField').value)||0;
+    ORG.ctcPolicy.defaultReimbursement = Number(document.getElementById('defReimbField').value)||0;
+    await saveOrg(); toast('CTC policy saved.');
   };
   document.getElementById('pwForm').onsubmit = async (ev)=>{
     ev.preventDefault(); const fd = new FormData(ev.target);
