@@ -119,6 +119,7 @@
   .pill.bad{background:var(--bad-soft);color:var(--bad);}
   .pill.neutral{background:var(--bg);color:var(--ink-soft);}
   .pill.accent{background:var(--accent-soft);color:var(--accent);}
+  .pill.warn{background:#FDF0DC;color:#B5720A;}
 
   .empty{text-align:center;padding:44px 20px;color:var(--muted);}
   .empty .icon{font-size:30px;margin-bottom:8px;}
@@ -206,6 +207,8 @@
       <button class="nav-item" data-tab="employees"><span class="ic">👥</span>Staff</button>
       <button class="nav-item" data-tab="payslips"><span class="ic">💰</span>Payslips</button>
       <button class="nav-item" data-tab="compliance"><span class="ic">🛡️</span>Compliance<span class="badge" id="compBadge" style="display:none;">0</span></button>
+      <button class="nav-item" data-tab="parties"><span class="ic">🤝</span>Parties</button>
+      <button class="nav-item" data-tab="documents"><span class="ic">📄</span>Documents<span class="badge" id="docBadge" style="display:none;">0</span></button>
       <button class="nav-item" data-tab="backup"><span class="ic">📦</span>Backup</button>
       <button class="nav-item" data-tab="settings"><span class="ic">🔒</span>Settings</button>
     </nav>
@@ -261,6 +264,8 @@ async function getJSON(key, def){
   if(key==='org-profile') return LOCAL.org!=null ? LOCAL.org : def;
   if(key==='employees') return LOCAL.employees!=null ? LOCAL.employees : def;
   if(key==='payslips') return LOCAL.payslips!=null ? LOCAL.payslips : def;
+  if(key==='parties') return LOCAL.parties!=null ? LOCAL.parties : def;
+  if(key==='documents') return LOCAL.documents!=null ? LOCAL.documents : def;
   if(key.indexOf('compliance:')===0){ const v = LOCAL.compliance[key.slice(11)]; return v!=null ? v : def; }
   return def;
 }
@@ -269,6 +274,8 @@ async function setJSON(key, value){
   if(key==='org-profile') LOCAL.org = value;
   else if(key==='employees') LOCAL.employees = value;
   else if(key==='payslips') LOCAL.payslips = value;
+  else if(key==='parties') LOCAL.parties = value;
+  else if(key==='documents') LOCAL.documents = value;
   else if(key.indexOf('compliance:')===0){ LOCAL.compliance[key.slice(11)] = value; }
   try{ localStorage.setItem(LS_KEY, JSON.stringify(LOCAL)); }
   catch(e){ toast('Local save failed — browser storage may be full. Try removing large documents.', true); return false; }
@@ -278,11 +285,12 @@ async function setJSON(key, value){
 function buildPayload(){
   ensureLocal();
   return { app:'Valles EASY EMS', version:2, savedAt:new Date().toISOString(),
-    org:ORG, employees:EMPLOYEES, payslips:PAYSLIPS, compliance:COMPLIANCE, tombstones:LOCAL.tombstones };
+    org:ORG, employees:EMPLOYEES, payslips:PAYSLIPS, compliance:COMPLIANCE,
+    parties:PARTIES, documents:COMPANY_DOCS, tombstones:LOCAL.tombstones };
 }
 
 /* ============================= STATE ============================= */
-let ORG = null, EMPLOYEES = [], PAYSLIPS = [], COMPLIANCE = {};
+let ORG = null, EMPLOYEES = [], PAYSLIPS = [], COMPLIANCE = {}, PARTIES = [], COMPANY_DOCS = [];
 let settingsUnlocked = false;
 let activeTab = 'dashboard';
 
@@ -413,9 +421,21 @@ async function loadAll(){
     if(!e.division) e.division='';
   });
   PAYSLIPS = await getJSON('payslips', []);
+  PARTIES = await getJSON('parties', []);
+  COMPANY_DOCS = await getJSON('documents', []);
   refreshBrand();
 }
 async function saveOrg(){ await setJSON('org-profile', ORG); }
+async function saveParties(){
+  const remote = await pullRemotePayload();
+  PARTIES = mergeCollection('parties', PARTIES, remote && remote.parties, remote && remote.tombstones && remote.tombstones.parties);
+  await setJSON('parties', PARTIES);
+}
+async function saveCompanyDocs(){
+  const remote = await pullRemotePayload();
+  COMPANY_DOCS = mergeCollection('documents', COMPANY_DOCS, remote && remote.documents, remote && remote.tombstones && remote.tombstones.documents);
+  await setJSON('documents', COMPANY_DOCS);
+}
 async function saveEmployees(){
   const remote = await pullRemotePayload();
   EMPLOYEES = mergeCollection('employees', EMPLOYEES, remote && remote.employees, remote && remote.tombstones && remote.tombstones.employees);
@@ -458,11 +478,14 @@ function setTab(tab){
     employees:['Staff','Employee records and salary structures'],
     payslips:['Payslips','Generate and print monthly pay slips'],
     compliance:['Compliance','TDS, EPFO, ESIC and PT filings & documents'],
+    parties:['Parties','Clients and sub-contractors directory'],
+    documents:['Documents','Registrations, licences, certificates and insurance'],
     backup:['Backup & Restore','Export and restore your data'],
     settings:['Settings','Company details — admin only']
   };
-  document.getElementById('topTitle').textContent = titles[tab][0];
-  document.getElementById('topSub').textContent = titles[tab][1];
+  const t = titles[tab] || ['',''];
+  document.getElementById('topTitle').textContent = t[0];
+  document.getElementById('topSub').textContent = t[1];
   render();
 }
 
@@ -483,6 +506,8 @@ function render(){
   if(activeTab==='employees') return renderEmployees(c, actions);
   if(activeTab==='payslips') return renderPayslips(c, actions);
   if(activeTab==='compliance') return renderCompliance(c, actions);
+  if(activeTab==='parties') return renderParties(c, actions);
+  if(activeTab==='documents') return renderDocuments(c, actions);
   if(activeTab==='backup') return renderBackup(c, actions);
   if(activeTab==='settings') return renderSettings(c, actions);
 }
@@ -1334,6 +1359,12 @@ function updateCompBadge(){
   const badge = document.getElementById('compBadge');
   if(missing>0){ badge.style.display='inline-block'; badge.textContent = missing; } else { badge.style.display='none'; }
 }
+function updateDocBadge(){
+  const n = COMPANY_DOCS.filter(d=>{ const s = docStatus(d); return (s==='Expiring'||s==='Expired') && !d.renewalAck; }).length;
+  const badge = document.getElementById('docBadge');
+  if(!badge) return;
+  if(n>0){ badge.style.display='inline-block'; badge.textContent = n; } else { badge.style.display='none'; }
+}
 
 let pendingFiles = [];
 function readFileAsDataURL(file){
@@ -1607,13 +1638,14 @@ async function driveRestoreBackup(fileId, label){
       const gdriveKeep = ORG.gdrive;
       ORG = data.org; ORG.gdrive = gdriveKeep;
       EMPLOYEES = data.employees||[]; PAYSLIPS = data.payslips||[]; COMPLIANCE = data.compliance||{};
-      await saveOrg(); await saveEmployees(); await savePayslips();
+      PARTIES = data.parties||[]; COMPANY_DOCS = data.documents||[];
+      await saveOrg(); await saveEmployees(); await savePayslips(); await saveParties(); await saveCompanyDocs();
       for(const empId of Object.keys(COMPLIANCE)){ await saveCompliance(empId); }
-      refreshBrand(); closeModal(); toast('Restored from Google Drive backup.'); setTab('dashboard');
+      refreshBrand(); closeModal(); toast('Restored from Google Drive backup.'); updateDocBadge(); setTab('dashboard');
     }catch(e){ toast('Restore failed.', true); }
   };
 }
-const SHEET_TABS = ['Employees','Salary History','Payslips','Compliance'];
+const SHEET_TABS = ['Employees','Salary History','Payslips','Compliance','Parties','Documents'];
 async function driveEnsureSheet(){
   let sheetId = ORG.gdrive.pinnedSheetId || ORG.gdrive.sheetId;
   if(sheetId){
@@ -1695,12 +1727,20 @@ async function driveExportSheet(silent){
       (COMPLIANCE[empId]||[]).forEach(r=> compRows.push([e?e.name:'', e?e.empCode:'', r.type, r.period, r.date, r.refNo, r.amount, r.remarks, (r.files||[]).length]));
     });
 
+    const partyRows = [['Party Name','Type','Contact Person','Email','Mobile','GST Number','PAN Number','Address']]
+      .concat(PARTIES.map(p=>[p.partyName,p.partyType,p.contactPerson,p.email,p.mobile,p.gstNumber,p.panNumber,p.address]));
+
+    const docRows = [['Document Name','Category','Insurance Type','Cert/Policy No.','Issuer','Holder Type','Holder','Issue Date','Expiry Date','Lifetime','Status','Premium','Sum Insured','Files Attached']]
+      .concat(COMPANY_DOCS.map(d=>[d.docName,d.docCategory,d.insuranceType,d.certNo,d.issuer,d.holderType,d.holderName,d.issueDate,d.expiryDate,d.isLifetime?'Yes':'No',docStatus(d),d.premiumAmount||0,d.sumInsured||0,(d.attachments||[]).length]));
+
     await driveWriteSheetTab(sheetId, 'Employees', empRows);
     await driveWriteSheetTab(sheetId, 'Salary History', salRows);
     await driveWriteSheetTab(sheetId, 'Payslips', slipRows);
     await driveWriteSheetTab(sheetId, 'Compliance', compRows);
+    await driveWriteSheetTab(sheetId, 'Parties', partyRows);
+    await driveWriteSheetTab(sheetId, 'Documents', docRows);
 
-    if(!silent){ toast('Google Sheet updated — Employees, Salary History, Payslips & Compliance tabs.'); if(activeTab==='settings') renderSettings(document.getElementById('content'), document.getElementById('tabActions')); }
+    if(!silent){ toast('Google Sheet updated — all tabs including Parties & Documents.'); if(activeTab==='settings') renderSettings(document.getElementById('content'), document.getElementById('tabActions')); }
   }catch(e){ driveLastError = e.message; if(!silent) toast('Sheet sync failed: '+e.message, true); throw e; }
 }
 
@@ -1790,12 +1830,322 @@ function conflictWarning(who, when, onDiscard, onOverwrite){
   document.getElementById('cwOverwrite').onclick = ()=>{ closeModal(); onOverwrite && onOverwrite(); };
 }
 
+/* ============================= PARTIES ============================= */
+function renderParties(c, actions){
+  actions.innerHTML = `<button class="btn" id="addPartyBtn">+ New Party</button>`;
+  actions.querySelector('#addPartyBtn').onclick = ()=> openPartyForm();
+  c.innerHTML = `
+    <div class="card">
+      <h2>Parties</h2>
+      <p style="color:var(--muted);font-size:13px;">Clients and sub-contractors — the shared directory used across Transactions, Bills &amp; Expenses, and Payment Requests.</p>
+      <div class="grid cols-2" style="margin-top:10px;">
+        <div class="field"><label>Search</label><input type="text" id="partySearch" placeholder="Name, GST, contact, mobile..."></div>
+        <div class="field"><label>Type</label><select id="partyTypeFilter"><option value="">All Types</option><option>Client</option><option>Sub-Contractor</option></select></div>
+      </div>
+      <div id="partyTableWrap"></div>
+    </div>
+  `;
+  function draw(){
+    const q = (document.getElementById('partySearch').value||'').toLowerCase();
+    const t = document.getElementById('partyTypeFilter').value;
+    const list = PARTIES.filter(p=>{
+      const mq = !q || [p.partyName,p.gstNumber,p.contactPerson,p.mobile,p.email].some(v=>(v||'').toLowerCase().includes(q));
+      const mt = !t || p.partyType===t;
+      return mq && mt;
+    });
+    const wrap = document.getElementById('partyTableWrap');
+    if(!list.length){ wrap.innerHTML = '<div class="empty"><div class="icon">🤝</div>No parties found.<div class="cta"><button class="btn" id="emptyAddParty">+ New Party</button></div></div>'; document.getElementById('emptyAddParty').onclick=()=>openPartyForm(); return; }
+    wrap.innerHTML = `<table><thead><tr><th>Party Name</th><th>Type</th><th>Contact Person</th><th>Email</th><th>Mobile</th><th>GST No.</th><th>PAN No.</th><th></th></tr></thead><tbody>
+      ${list.map(p=>`<tr>
+        <td><b>${esc(p.partyName)}</b>${p.address?`<div style="color:var(--muted);font-size:11.5px;">${esc(p.address)}</div>`:''}</td>
+        <td><span class="pill ${p.partyType==='Client'?'accent':'neutral'}">${esc(p.partyType)}</span></td>
+        <td>${esc(p.contactPerson||'—')}</td><td>${esc(p.email||'—')}</td><td>${esc(p.mobile||'—')}</td>
+        <td>${esc(p.gstNumber||'—')}</td><td>${esc(p.panNumber||'—')}</td>
+        <td class="no-print" style="white-space:nowrap;"><button class="btn secondary sm" data-edit="${p.id}">Edit</button> <button class="btn danger sm" data-del="${p.id}">Delete</button></td>
+      </tr>`).join('')}
+    </tbody></table>`;
+    wrap.querySelectorAll('[data-edit]').forEach(b=> b.onclick=()=>openPartyForm(b.dataset.edit));
+    wrap.querySelectorAll('[data-del]').forEach(b=> b.onclick=()=>deleteParty(b.dataset.del));
+  }
+  document.getElementById('partySearch').addEventListener('input', draw);
+  document.getElementById('partyTypeFilter').addEventListener('change', draw);
+  draw();
+}
+function openPartyForm(partyId){
+  const isEdit = !!partyId;
+  const p = isEdit ? PARTIES.find(x=>x.id===partyId) : { partyType:'Client' };
+  const baseRev = Number(p._rev)||0;
+  openModal(`
+    <div class="modal-head"><h3>${isEdit?'Edit Party':'New Party'}</h3><button class="modal-close" id="mClose">✕</button></div>
+    <form id="partyForm">
+      <div class="grid cols-2">
+        <div class="field"><label>Party Name</label><input type="text" name="partyName" value="${esc(p.partyName)}" required></div>
+        <div class="field"><label>Type</label><select name="partyType"><option ${p.partyType==='Client'?'selected':''}>Client</option><option ${p.partyType==='Sub-Contractor'?'selected':''}>Sub-Contractor</option></select></div>
+      </div>
+      <div class="grid cols-2">
+        <div class="field"><label>Contact Person</label><input type="text" name="contactPerson" value="${esc(p.contactPerson)}"></div>
+        <div class="field"><label>Mobile</label><input type="text" name="mobile" value="${esc(p.mobile)}"></div>
+      </div>
+      <div class="grid cols-2">
+        <div class="field"><label>Email</label><input type="email" name="email" value="${esc(p.email)}"></div>
+        <div class="field"><label>GST Number</label><input type="text" name="gstNumber" value="${esc(p.gstNumber)}"></div>
+      </div>
+      <div class="grid cols-2">
+        <div class="field"><label>PAN Number</label><input type="text" name="panNumber" value="${esc(p.panNumber)}"></div>
+        <div class="field"><label>Address</label><input type="text" name="address" value="${esc(p.address)}"></div>
+      </div>
+      <div class="btn-row"><button type="submit" class="btn">Save Party</button><button type="button" class="btn secondary" id="mCancel">Cancel</button></div>
+    </form>
+  `, true);
+  document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+  document.getElementById('partyForm').onsubmit = async (ev)=>{
+    ev.preventDefault();
+    if(isEdit){
+      const conflict = await checkRecordConflict('parties', partyId, baseRev);
+      if(conflict){
+        conflictWarning(conflict._updatedBy, conflict._updatedAt,
+          ()=>{ const idx = PARTIES.findIndex(x=>x.id===partyId); if(idx>-1) PARTIES[idx]=conflict; openPartyForm(partyId); },
+          ()=> submitPartyForm(ev, isEdit, p));
+        return;
+      }
+    }
+    await submitPartyForm(ev, isEdit, p);
+  };
+}
+async function submitPartyForm(ev, isEdit, p){
+  const fd = new FormData(ev.target);
+  const rec = { id: p.id||uid(), partyName: fd.get('partyName').trim(), partyType: fd.get('partyType'),
+    contactPerson: fd.get('contactPerson').trim(), mobile: fd.get('mobile').trim(), email: fd.get('email').trim(),
+    gstNumber: fd.get('gstNumber').trim(), panNumber: fd.get('panNumber').trim(), address: fd.get('address').trim() };
+  if(isEdit) rec._rev = p._rev;
+  tagRecord(rec, !isEdit);
+  if(isEdit){ const idx = PARTIES.findIndex(x=>x.id===p.id); PARTIES[idx]=rec; } else { PARTIES.push(rec); }
+  await saveParties();
+  closeModal(); toast(isEdit?'Party updated.':'Party added.'); render();
+}
+function deleteParty(id){
+  const p = PARTIES.find(x=>x.id===id); if(!p) return;
+  openModal(`
+    <div class="modal-head"><h3>Delete Party</h3><button class="modal-close" id="mClose">✕</button></div>
+    <p>Delete <b>${esc(p.partyName)}</b>? This cannot be undone.</p>
+    <div class="btn-row"><button class="btn danger" id="confirmDelParty">Delete</button><button class="btn secondary" id="mCancel">Cancel</button></div>
+  `);
+  document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+  document.getElementById('confirmDelParty').onclick = async ()=>{
+    PARTIES = PARTIES.filter(x=>x.id!==id); recordTombstone('parties', id);
+    await saveParties(); closeModal(); toast('Party deleted.'); render();
+  };
+}
+
+/* ============================= COMPANY DOCUMENTS ============================= */
+const DOC_CATEGORIES = ['Registration','Licence','Certificate','Insurance','Other'];
+const INSURANCE_TYPES = ['WCC (Workmen Comp)','Group Medical','Personal & Accidental','Overseas Medical','Other'];
+function docStatus(d){
+  if(d.isLifetime || !d.expiryDate) return 'Lifetime';
+  const today = new Date(); today.setHours(0,0,0,0);
+  const exp = new Date(d.expiryDate); exp.setHours(0,0,0,0);
+  const daysLeft = Math.ceil((exp-today)/86400000);
+  if(daysLeft<0) return 'Expired';
+  if(daysLeft<=30) return 'Expiring';
+  return 'Valid';
+}
+function docDaysToExpiry(d){
+  if(d.isLifetime || !d.expiryDate) return null;
+  const today = new Date(); today.setHours(0,0,0,0);
+  const exp = new Date(d.expiryDate); exp.setHours(0,0,0,0);
+  return Math.ceil((exp-today)/86400000);
+}
+function renderDocuments(c, actions){
+  actions.innerHTML = `<button class="btn" id="addDocBtn">+ Add Document</button>`;
+  actions.querySelector('#addDocBtn').onclick = ()=> openDocForm();
+  const counts = { Valid:0, Expiring:0, Expired:0, Lifetime:0 };
+  COMPANY_DOCS.forEach(d=> counts[docStatus(d)]++);
+  c.innerHTML = `
+    <div class="stat-row">
+      <div class="stat" style="background:var(--g-green);"><div class="n">${counts.Valid}</div><div class="l"><span class="ic">✅</span>Valid</div></div>
+      <div class="stat" style="background:var(--g-amber);"><div class="n">${counts.Expiring}</div><div class="l"><span class="ic">⏳</span>Expiring (≤30d)</div></div>
+      <div class="stat" style="background:var(--g-red);"><div class="n">${counts.Expired}</div><div class="l"><span class="ic">⚠️</span>Expired</div></div>
+      <div class="stat" style="background:var(--g-blue);"><div class="n">${counts.Lifetime}</div><div class="l"><span class="ic">♾️</span>Lifetime / N/A</div></div>
+    </div>
+    <div class="card">
+      <h2>Company Documents</h2>
+      <p style="color:var(--muted);font-size:13px;">Registrations, licences, certificates and insurance policies — company-wide or held by a specific staff member — with renewal reminders 30 days before expiry.</p>
+      <div class="grid cols-4" style="margin-top:10px;">
+        <div class="field"><label>Search</label><input type="text" id="docSearch" placeholder="Name, cert #, issuer, holder..."></div>
+        <div class="field"><label>Category</label><select id="docCatFilter"><option value="">All Categories</option>${DOC_CATEGORIES.map(c=>`<option>${c}</option>`).join('')}</select></div>
+        <div class="field"><label>Insurance Type</label><select id="docInsFilter"><option value="">All Insurance Types</option>${INSURANCE_TYPES.map(t=>`<option>${t}</option>`).join('')}</select></div>
+        <div class="field"><label>Status</label><select id="docStatusFilter"><option value="">All Statuses</option><option>Valid</option><option>Expiring</option><option>Expired</option><option>Lifetime</option></select></div>
+      </div>
+      <div id="docTableWrap"></div>
+    </div>
+  `;
+  function draw(){
+    const q = (document.getElementById('docSearch').value||'').toLowerCase();
+    const cat = document.getElementById('docCatFilter').value;
+    const ins = document.getElementById('docInsFilter').value;
+    const st = document.getElementById('docStatusFilter').value;
+    let list = COMPANY_DOCS.filter(d=>{
+      const mq = !q || [d.docName,d.certNo,d.issuer,d.holderName].some(v=>(v||'').toLowerCase().includes(q));
+      const mc = !cat || d.docCategory===cat;
+      const mi = !ins || d.insuranceType===ins;
+      const ms = !st || docStatus(d)===st;
+      return mq && mc && mi && ms;
+    });
+    const order = {Expired:0, Expiring:1, Valid:2, Lifetime:3};
+    list = list.slice().sort((a,b)=>{ const oa=order[docStatus(a)], ob=order[docStatus(b)]; if(oa!==ob) return oa-ob; return (a.expiryDate||'9999').localeCompare(b.expiryDate||'9999'); });
+    const wrap = document.getElementById('docTableWrap');
+    if(!list.length){ wrap.innerHTML = '<div class="empty"><div class="icon">📄</div>No documents found.<div class="cta"><button class="btn" id="emptyAddDoc">+ Add Document</button></div></div>'; document.getElementById('emptyAddDoc').onclick=()=>openDocForm(); return; }
+    wrap.innerHTML = `<table><thead><tr><th>Document</th><th>Category</th><th>Cert / Policy #</th><th>Holder</th><th>Expiry</th><th>Status</th><th></th></tr></thead><tbody>
+      ${list.map(d=>{
+        const s = docStatus(d); const days = docDaysToExpiry(d);
+        const pillClass = s==='Valid'?'good':s==='Expiring'?'warn':s==='Expired'?'bad':'neutral';
+        return `<tr>
+          <td><b>${esc(d.docName)}</b>${d.issuer?`<div style="color:var(--muted);font-size:11.5px;">${esc(d.issuer)}</div>`:''}</td>
+          <td>${esc(d.docCategory)}${d.docCategory==='Insurance'&&d.insuranceType?`<div style="color:var(--muted);font-size:11.5px;">${esc(d.insuranceType)}</div>`:''}</td>
+          <td>${esc(d.certNo||'—')}</td>
+          <td>${d.holderType==='Staff'?('👤 '+esc(d.holderName||'—')):('🏢 '+esc(d.holderName||ORG.companyName))}</td>
+          <td>${d.isLifetime?'—':esc(d.expiryDate||'—')}${(s==='Expiring'||s==='Expired')&&days!=null?`<div style="color:var(--muted);font-size:11.5px;">${days<0?Math.abs(days)+'d overdue':days+'d left'}</div>`:''}</td>
+          <td><span class="pill ${pillClass}">${s}</span>${(s==='Expiring'||s==='Expired')&&!d.renewalAck?` <button class="btn secondary sm" data-ack="${d.id}" title="Acknowledge — dismiss from the nav alert badge">Ack</button>`:''}</td>
+          <td class="no-print" style="white-space:nowrap;"><button class="btn secondary sm" data-edit="${d.id}">Edit</button> <button class="btn danger sm" data-del="${d.id}">Delete</button></td>
+        </tr>`;
+      }).join('')}
+    </tbody></table>`;
+    wrap.querySelectorAll('[data-edit]').forEach(b=> b.onclick=()=>openDocForm(b.dataset.edit));
+    wrap.querySelectorAll('[data-del]').forEach(b=> b.onclick=()=>deleteDoc(b.dataset.del));
+    wrap.querySelectorAll('[data-ack]').forEach(b=> b.onclick=async ()=>{
+      const d = COMPANY_DOCS.find(x=>x.id===b.dataset.ack); if(!d) return;
+      d.renewalAck = true; tagRecord(d, false); await saveCompanyDocs(); updateDocBadge(); draw();
+    });
+  }
+  ['docSearch','docCatFilter','docInsFilter','docStatusFilter'].forEach(id=> document.getElementById(id).addEventListener('input', draw));
+  draw();
+}
+let pendingDocFiles = [];
+function openDocForm(docId){
+  const isEdit = !!docId;
+  const d = isEdit ? COMPANY_DOCS.find(x=>x.id===docId) : { docCategory:'Registration', holderType:'Company', holderName:ORG.companyName||'' };
+  const baseRev = Number(d._rev)||0;
+  pendingDocFiles = isEdit ? (d.attachments||[]).slice() : [];
+  openModal(`
+    <div class="modal-head"><h3>${isEdit?'Edit':'Add'} Document</h3><button class="modal-close" id="mClose">✕</button></div>
+    <form id="docForm">
+      <div class="field"><label>Document Name</label><input type="text" name="docName" value="${esc(d.docName)}" placeholder="e.g. GST Registration Certificate" required></div>
+      <div class="grid cols-2">
+        <div class="field"><label>Category</label><select name="docCategory" id="docCatSel">${DOC_CATEGORIES.map(c=>`<option ${d.docCategory===c?'selected':''}>${c}</option>`).join('')}</select></div>
+        <div class="field" id="docInsTypeField" style="display:${d.docCategory==='Insurance'?'block':'none'};"><label>Insurance Type</label><select name="insuranceType"><option value="">— Select —</option>${INSURANCE_TYPES.map(t=>`<option ${d.insuranceType===t?'selected':''}>${t}</option>`).join('')}</select></div>
+      </div>
+      <div class="grid cols-2">
+        <div class="field"><label>Certificate / Policy #</label><input type="text" name="certNo" value="${esc(d.certNo)}"></div>
+        <div class="field"><label>Issuer / Insurer</label><input type="text" name="issuer" value="${esc(d.issuer)}"></div>
+      </div>
+      <div class="section-label">Holder</div>
+      <div class="grid cols-2">
+        <div class="field"><label>Holder Type</label><select name="holderType" id="docHolderTypeSel"><option value="Company" ${d.holderType==='Company'?'selected':''}>🏢 Company-wide</option><option value="Staff" ${d.holderType==='Staff'?'selected':''}>👤 Specific Staff Member</option></select></div>
+        <div class="field" id="docHolderStaffField" style="display:${d.holderType==='Staff'?'block':'none'};"><label>Staff Member</label><select name="holderStaffId">
+          <option value="">— Select Staff —</option>${EMPLOYEES.map(e=>`<option value="${e.id}" ${d.holderStaffID===e.id?'selected':''}>${esc(e.name)} (${esc(e.empCode)})</option>`).join('')}
+        </select></div>
+      </div>
+      <div class="field"><label>Holder Name (as shown in lists)</label><input type="text" name="holderName" value="${esc(d.holderName)}"></div>
+      <div class="grid cols-3">
+        <div class="field"><label>Issue Date</label><input type="date" name="issueDate" value="${esc(d.issueDate)}"></div>
+        <div class="field"><label>Expiry Date</label><input type="date" name="expiryDate" value="${esc(d.expiryDate)}" id="docExpiryField"></div>
+        <div class="field" style="display:flex;align-items:end;"><label class="checkline"><input type="checkbox" name="isLifetime" id="docLifetimeChk" ${d.isLifetime?'checked':''}> Lifetime / No expiry</label></div>
+      </div>
+      <div class="grid cols-2" id="docInsuranceFields" style="display:${d.docCategory==='Insurance'?'grid':'none'};">
+        <div class="field"><label>Premium Amount (₹)</label><input type="number" min="0" step="0.01" name="premiumAmount" value="${d.premiumAmount||''}"></div>
+        <div class="field"><label>Sum Insured (₹)</label><input type="number" min="0" step="0.01" name="sumInsured" value="${d.sumInsured||''}"></div>
+      </div>
+      <div class="field"><label>Coverage Details</label><textarea name="coverageDetails" rows="2">${esc(d.coverageDetails)}</textarea></div>
+      <div class="field"><label>Notes</label><textarea name="notes" rows="2">${esc(d.notes)}</textarea></div>
+      <div class="section-label">Attachments</div>
+      <div class="file-drop" id="docDropZone">Click to choose files, or drag &amp; drop scans/copies</div>
+      <input type="file" id="docFileInput" multiple style="display:none;">
+      <div id="docFileChips"></div>
+      <div class="btn-row"><button type="submit" class="btn">Save Document</button><button type="button" class="btn secondary" id="mCancel">Cancel</button></div>
+    </form>
+  `, true);
+  document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+  document.getElementById('docCatSel').addEventListener('change', (e)=>{
+    const isIns = e.target.value==='Insurance';
+    document.getElementById('docInsTypeField').style.display = isIns?'block':'none';
+    document.getElementById('docInsuranceFields').style.display = isIns?'grid':'none';
+  });
+  document.getElementById('docHolderTypeSel').addEventListener('change', (e)=>{
+    document.getElementById('docHolderStaffField').style.display = e.target.value==='Staff'?'block':'none';
+  });
+  document.getElementById('docLifetimeChk').addEventListener('change', (e)=>{
+    document.getElementById('docExpiryField').disabled = e.target.checked;
+  });
+  document.getElementById('docExpiryField').disabled = !!d.isLifetime;
+  const dropZone = document.getElementById('docDropZone'); const fileInput = document.getElementById('docFileInput');
+  dropZone.onclick = ()=> fileInput.click();
+  dropZone.ondragover = (e)=> e.preventDefault();
+  dropZone.ondrop = async (e)=>{ e.preventDefault(); await handleDocFiles(e.dataTransfer.files); };
+  fileInput.onchange = async ()=> handleDocFiles(fileInput.files);
+  async function handleDocFiles(fileList){
+    for(const f of fileList){ try{ pendingDocFiles.push(await readFileAsDataURL(f)); }catch(err){ toast('Could not read file: '+f.name, true); } }
+    drawDocChips();
+  }
+  function drawDocChips(){
+    document.getElementById('docFileChips').innerHTML = pendingDocFiles.map((f,i)=>`<div class="file-chip"><span class="fname">${esc(f.name)} (${Math.round(f.size/1024)} KB)</span><button type="button" data-rmdoc="${i}">✕</button></div>`).join('');
+    document.querySelectorAll('[data-rmdoc]').forEach(b=>b.onclick=()=>{ pendingDocFiles.splice(Number(b.dataset.rmdoc),1); drawDocChips(); });
+  }
+  drawDocChips();
+  document.getElementById('docForm').onsubmit = async (ev)=>{
+    ev.preventDefault();
+    if(isEdit){
+      const conflict = await checkRecordConflict('documents', docId, baseRev);
+      if(conflict){
+        conflictWarning(conflict._updatedBy, conflict._updatedAt,
+          ()=>{ const idx = COMPANY_DOCS.findIndex(x=>x.id===docId); if(idx>-1) COMPANY_DOCS[idx]=conflict; openDocForm(docId); },
+          ()=> submitDocForm(ev, isEdit, d));
+        return;
+      }
+    }
+    await submitDocForm(ev, isEdit, d);
+  };
+}
+async function submitDocForm(ev, isEdit, d){
+  const fd = new FormData(ev.target);
+  const holderStaffId = fd.get('holderStaffId')||'';
+  const emp = holderStaffId ? EMPLOYEES.find(x=>x.id===holderStaffId) : null;
+  const rec = {
+    id: d.id||uid(), docName: fd.get('docName').trim(), docCategory: fd.get('docCategory'),
+    insuranceType: fd.get('insuranceType')||'', certNo: fd.get('certNo').trim(), issuer: fd.get('issuer').trim(),
+    holderType: fd.get('holderType'), holderStaffID: holderStaffId,
+    holderName: fd.get('holderType')==='Staff' ? (emp?emp.name:fd.get('holderName').trim()) : (fd.get('holderName').trim()||ORG.companyName),
+    issueDate: fd.get('issueDate'), expiryDate: fd.get('isLifetime')?'':fd.get('expiryDate'),
+    isLifetime: fd.get('isLifetime')==='on',
+    premiumAmount: Number(fd.get('premiumAmount'))||0, sumInsured: Number(fd.get('sumInsured'))||0,
+    coverageDetails: fd.get('coverageDetails').trim(), notes: fd.get('notes').trim(),
+    attachments: pendingDocFiles, renewalAck: isEdit ? (d.renewalAck && d.expiryDate===fd.get('expiryDate')) : false
+  };
+  if(isEdit) rec._rev = d._rev;
+  tagRecord(rec, !isEdit);
+  if(isEdit){ const idx = COMPANY_DOCS.findIndex(x=>x.id===d.id); COMPANY_DOCS[idx]=rec; } else { COMPANY_DOCS.push(rec); }
+  await saveCompanyDocs();
+  closeModal(); toast(isEdit?'Document updated.':'Document added.'); updateDocBadge(); render();
+}
+function deleteDoc(id){
+  const d = COMPANY_DOCS.find(x=>x.id===id); if(!d) return;
+  openModal(`
+    <div class="modal-head"><h3>Delete Document</h3><button class="modal-close" id="mClose">✕</button></div>
+    <p>Delete <b>${esc(d.docName)}</b>? This cannot be undone.</p>
+    <div class="btn-row"><button class="btn danger" id="confirmDelDoc">Delete</button><button class="btn secondary" id="mCancel">Cancel</button></div>
+  `);
+  document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+  document.getElementById('confirmDelDoc').onclick = async ()=>{
+    COMPANY_DOCS = COMPANY_DOCS.filter(x=>x.id!==id); recordTombstone('documents', id);
+    await saveCompanyDocs(); closeModal(); toast('Document deleted.'); updateDocBadge(); render();
+  };
+}
+
 /* ============================= BACKUP & RESTORE ============================= */
 function renderBackup(c, actions){
   c.innerHTML = `
     <div class="card">
       <h2>Export Backup</h2>
-      <p style="color:var(--muted);font-size:13px;">Downloads a single JSON file containing your company profile, employees (with full salary-revision history), payslips and all compliance records with attached documents. Store this file in your own Google Drive folder to keep an off-site copy.</p>
+      <p style="color:var(--muted);font-size:13px;">Downloads a single JSON file containing your company profile, employees (with full salary-revision history), payslips, compliance records, parties, and company documents — all with attached files. Store this file in your own Google Drive folder to keep an off-site copy.</p>
       <div class="btn-row"><button class="btn" id="exportBtn">⬇ Export Full Backup (.json)</button></div>
     </div>
     <div class="card">
@@ -1811,7 +2161,7 @@ function renderBackup(c, actions){
 }
 async function doExport(){
   for(const e of EMPLOYEES){ await loadCompliance(e.id); }
-  const payload = { exportedAt: new Date().toISOString(), app: 'Valles EASY EMS', version: 2, org: ORG, employees: EMPLOYEES, payslips: PAYSLIPS, compliance: COMPLIANCE };
+  const payload = { exportedAt: new Date().toISOString(), app: 'Valles EASY EMS', version: 2, org: ORG, employees: EMPLOYEES, payslips: PAYSLIPS, compliance: COMPLIANCE, parties: PARTIES, documents: COMPANY_DOCS };
   const blob = new Blob([JSON.stringify(payload,null,2)], {type:'application/json'});
   const url = URL.createObjectURL(blob); const a = document.createElement('a');
   a.href = url; a.download = `valles-easy-ems-backup-${new Date().toISOString().slice(0,10)}.json`;
@@ -1831,9 +2181,10 @@ function doRestore(file){
     document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
     document.getElementById('confirmRestore').onclick = async ()=>{
       ORG = data.org; EMPLOYEES = data.employees||[]; PAYSLIPS = data.payslips||[]; COMPLIANCE = data.compliance||{};
-      await saveOrg(); await saveEmployees(); await savePayslips();
+      PARTIES = data.parties||[]; COMPANY_DOCS = data.documents||[];
+      await saveOrg(); await saveEmployees(); await savePayslips(); await saveParties(); await saveCompanyDocs();
       for(const empId of Object.keys(COMPLIANCE)){ await saveCompliance(empId); }
-      refreshBrand(); closeModal(); toast('Backup restored.'); setTab('dashboard');
+      refreshBrand(); closeModal(); toast('Backup restored.'); updateDocBadge(); setTab('dashboard');
     };
   };
   reader.readAsText(file);
@@ -2174,6 +2525,7 @@ function renderSettings(c, actions){
   await loadAll();
   for(const e of EMPLOYEES){ await loadCompliance(e.id); }
   updateCompBadge();
+  updateDocBadge();
   setTab('dashboard');
   if(ORG.gdrive && ORG.gdrive.connected){ attemptSilentDriveReconnect(); startAutoSyncLoop(); ensureStaffName(); }
 })();
