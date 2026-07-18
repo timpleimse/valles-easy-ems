@@ -208,6 +208,7 @@
       <button class="nav-item" data-tab="payslips"><span class="ic">💰</span>Payslips</button>
       <button class="nav-item" data-tab="compliance"><span class="ic">🛡️</span>Compliance<span class="badge" id="compBadge" style="display:none;">0</span></button>
       <button class="nav-item" data-tab="parties"><span class="ic">🤝</span>Parties</button>
+      <button class="nav-item" data-tab="transactions"><span class="ic">📑</span>Transactions</button>
       <button class="nav-item" data-tab="documents"><span class="ic">📄</span>Documents<span class="badge" id="docBadge" style="display:none;">0</span></button>
       <button class="nav-item" data-tab="backup"><span class="ic">📦</span>Backup</button>
       <button class="nav-item" data-tab="settings"><span class="ic">🔒</span>Settings</button>
@@ -266,6 +267,7 @@ async function getJSON(key, def){
   if(key==='payslips') return LOCAL.payslips!=null ? LOCAL.payslips : def;
   if(key==='parties') return LOCAL.parties!=null ? LOCAL.parties : def;
   if(key==='documents') return LOCAL.documents!=null ? LOCAL.documents : def;
+  if(key==='transactions') return LOCAL.transactions!=null ? LOCAL.transactions : def;
   if(key.indexOf('compliance:')===0){ const v = LOCAL.compliance[key.slice(11)]; return v!=null ? v : def; }
   return def;
 }
@@ -276,6 +278,7 @@ async function setJSON(key, value){
   else if(key==='payslips') LOCAL.payslips = value;
   else if(key==='parties') LOCAL.parties = value;
   else if(key==='documents') LOCAL.documents = value;
+  else if(key==='transactions') LOCAL.transactions = value;
   else if(key.indexOf('compliance:')===0){ LOCAL.compliance[key.slice(11)] = value; }
   try{ localStorage.setItem(LS_KEY, JSON.stringify(LOCAL)); }
   catch(e){ toast('Local save failed — browser storage may be full. Try removing large documents.', true); return false; }
@@ -286,18 +289,18 @@ function buildPayload(){
   ensureLocal();
   return { app:'Valles EASY EMS', version:2, savedAt:new Date().toISOString(),
     org:ORG, employees:EMPLOYEES, payslips:PAYSLIPS, compliance:COMPLIANCE,
-    parties:PARTIES, documents:COMPANY_DOCS, tombstones:LOCAL.tombstones };
+    parties:PARTIES, documents:COMPANY_DOCS, transactions:TRANSACTIONS, tombstones:LOCAL.tombstones };
 }
 
 /* ============================= STATE ============================= */
-let ORG = null, EMPLOYEES = [], PAYSLIPS = [], COMPLIANCE = {}, PARTIES = [], COMPANY_DOCS = [];
+let ORG = null, EMPLOYEES = [], PAYSLIPS = [], COMPLIANCE = {}, PARTIES = [], COMPANY_DOCS = [], TRANSACTIONS = [];
 let settingsUnlocked = false;
 let activeTab = 'dashboard';
 
 const DEFAULT_ORG = {
   companyName: "Your Company Pvt. Ltd.",
   address: "", tel:"", email:"",
-  cin: "", pan: "", tan: "", logo: "",
+  cin: "", pan: "", tan: "", gstin: "", logo: "",
   bankName: "", bankAccNo: "", bankIFSC: "", bankBranch: "",
   ptSlabs: [ {min:0, max:15000, amount:0}, {min:15001, max:20000, amount:150}, {min:20001, max:1000000000, amount:200} ],
   applyPfCeiling: false, pfCeiling: 15000,
@@ -319,6 +322,14 @@ const DEFAULT_ORG = {
     surcharge: [[5000000,0.10],[10000000,0.15],[20000000,0.25],[50000000,0.37]]
   },
   adminPasswordHash: "", employeeSeq: 1,
+  /* Transaction numbering — one running counter per category, e.g. QUOT-2026-0001.
+     allowFinalisedTxnEdit unlocks edit/delete on Completed/Paid/Invoiced transactions,
+     which are otherwise locked for audit safety (see Settings → Transactions). */
+  txnSeq: {},
+  /* 3-letter codes used in transaction numbers, e.g. QTE2627001 = QTE + FY2026-27 + seq 001.
+     Editable in Settings → Transactions. */
+  txnPrefixes: { ENQUIRY:'ENQ', QUOTATION:'QTE', PO:'POR', INVOICE:'INV', CREDIT_NOTE:'CRN', DELIVERY_NOTE:'DCN' },
+  allowFinalisedTxnEdit: false,
   gdrive: { clientId:'870827159813-4g2i299mv9qduqpmju40mpr5f63uvgns.apps.googleusercontent.com', connected:false, folderId:null, fileId:null, backupsFolderId:null, sheetId:null, lastSynced:null, email:'',
     /* Pinned IDs: when set, every device uses these exact Drive resources directly — no
        search, no chance of a fresh device ever spinning up a duplicate folder/sheet. Leave
@@ -402,6 +413,10 @@ async function loadAll(){
   if(!ORG.ctcPolicy) ORG.ctcPolicy = JSON.parse(JSON.stringify(DEFAULT_ORG.ctcPolicy));
   if(!ORG.taxNew) ORG.taxNew = JSON.parse(JSON.stringify(DEFAULT_ORG.taxNew));
   if(!ORG.taxOld) ORG.taxOld = JSON.parse(JSON.stringify(DEFAULT_ORG.taxOld));
+  if(!ORG.txnSeq) ORG.txnSeq = JSON.parse(JSON.stringify(DEFAULT_ORG.txnSeq));
+  if(!ORG.txnPrefixes) ORG.txnPrefixes = JSON.parse(JSON.stringify(DEFAULT_ORG.txnPrefixes));
+  if(ORG.allowFinalisedTxnEdit===undefined) ORG.allowFinalisedTxnEdit = false;
+  if(ORG.gstin===undefined) ORG.gstin = '';
   EMPLOYEES = await getJSON('employees', []);
   // migrate legacy records that still have a flat `salary` object instead of salaryHistory
   EMPLOYEES.forEach(e=>{
@@ -423,9 +438,15 @@ async function loadAll(){
   PAYSLIPS = await getJSON('payslips', []);
   PARTIES = await getJSON('parties', []);
   COMPANY_DOCS = await getJSON('documents', []);
+  TRANSACTIONS = await getJSON('transactions', []);
   refreshBrand();
 }
 async function saveOrg(){ await setJSON('org-profile', ORG); }
+async function saveTransactions(){
+  const remote = await pullRemotePayload();
+  TRANSACTIONS = mergeCollection('transactions', TRANSACTIONS, remote && remote.transactions, remote && remote.tombstones && remote.tombstones.transactions);
+  await setJSON('transactions', TRANSACTIONS);
+}
 async function saveParties(){
   const remote = await pullRemotePayload();
   PARTIES = mergeCollection('parties', PARTIES, remote && remote.parties, remote && remote.tombstones && remote.tombstones.parties);
@@ -479,6 +500,7 @@ function setTab(tab){
     payslips:['Payslips','Generate and print monthly pay slips'],
     compliance:['Compliance','TDS, EPFO, ESIC and PT filings & documents'],
     parties:['Parties','Clients and sub-contractors directory'],
+    transactions:['Transactions','Enquiries, quotations, purchase orders, invoices, credit & delivery notes'],
     documents:['Documents','Registrations, licences, certificates and insurance'],
     backup:['Backup & Restore','Export and restore your data'],
     settings:['Settings','Company details — admin only']
@@ -507,6 +529,7 @@ function render(){
   if(activeTab==='payslips') return renderPayslips(c, actions);
   if(activeTab==='compliance') return renderCompliance(c, actions);
   if(activeTab==='parties') return renderParties(c, actions);
+  if(activeTab==='transactions') return renderTransactions(c, actions);
   if(activeTab==='documents') return renderDocuments(c, actions);
   if(activeTab==='backup') return renderBackup(c, actions);
   if(activeTab==='settings') return renderSettings(c, actions);
@@ -1638,14 +1661,14 @@ async function driveRestoreBackup(fileId, label){
       const gdriveKeep = ORG.gdrive;
       ORG = data.org; ORG.gdrive = gdriveKeep;
       EMPLOYEES = data.employees||[]; PAYSLIPS = data.payslips||[]; COMPLIANCE = data.compliance||{};
-      PARTIES = data.parties||[]; COMPANY_DOCS = data.documents||[];
-      await saveOrg(); await saveEmployees(); await savePayslips(); await saveParties(); await saveCompanyDocs();
+      PARTIES = data.parties||[]; COMPANY_DOCS = data.documents||[]; TRANSACTIONS = data.transactions||[];
+      await saveOrg(); await saveEmployees(); await savePayslips(); await saveParties(); await saveCompanyDocs(); await saveTransactions();
       for(const empId of Object.keys(COMPLIANCE)){ await saveCompliance(empId); }
       refreshBrand(); closeModal(); toast('Restored from Google Drive backup.'); updateDocBadge(); setTab('dashboard');
     }catch(e){ toast('Restore failed.', true); }
   };
 }
-const SHEET_TABS = ['Employees','Salary History','Payslips','Compliance','Parties','Documents'];
+const SHEET_TABS = ['Employees','Salary History','Payslips','Compliance','Parties','Documents','Transactions'];
 async function driveEnsureSheet(){
   let sheetId = ORG.gdrive.pinnedSheetId || ORG.gdrive.sheetId;
   if(sheetId){
@@ -1733,14 +1756,18 @@ async function driveExportSheet(silent){
     const docRows = [['Document Name','Category','Insurance Type','Cert/Policy No.','Issuer','Holder Type','Holder','Issue Date','Expiry Date','Lifetime','Status','Premium','Sum Insured','Files Attached']]
       .concat(COMPANY_DOCS.map(d=>[d.docName,d.docCategory,d.insuranceType,d.certNo,d.issuer,d.holderType,d.holderName,d.issueDate,d.expiryDate,d.isLifetime?'Yes':'No',docStatus(d),d.premiumAmount||0,d.sumInsured||0,(d.attachments||[]).length]));
 
+    const txnRows = [['Txn No.','Category','Direction','Party','Date','Due Date','Status','Reference','Subject','Subtotal','GST Mode','Tax Amount','Grand Total','Revision No.']]
+      .concat(TRANSACTIONS.map(t=>{ const tot = calcTxnTotals(t); return [t.txnNo,TXN_CATEGORIES[t.txnCategory]?TXN_CATEGORIES[t.txnCategory].label:t.txnCategory,t.txnDirection,t.partyName,t.txnDate,t.dueDate,t.status,(t.referenceType||'')+' '+(t.reference||''),t.subject,tot.subtotal,t.gstMode,tot.taxAmount,tot.grandTotal,t.revisionNo||0]; }));
+
     await driveWriteSheetTab(sheetId, 'Employees', empRows);
     await driveWriteSheetTab(sheetId, 'Salary History', salRows);
     await driveWriteSheetTab(sheetId, 'Payslips', slipRows);
     await driveWriteSheetTab(sheetId, 'Compliance', compRows);
     await driveWriteSheetTab(sheetId, 'Parties', partyRows);
     await driveWriteSheetTab(sheetId, 'Documents', docRows);
+    await driveWriteSheetTab(sheetId, 'Transactions', txnRows);
 
-    if(!silent){ toast('Google Sheet updated — all tabs including Parties & Documents.'); if(activeTab==='settings') renderSettings(document.getElementById('content'), document.getElementById('tabActions')); }
+    if(!silent){ toast('Google Sheet updated — all tabs including Transactions.'); if(activeTab==='settings') renderSettings(document.getElementById('content'), document.getElementById('tabActions')); }
   }catch(e){ driveLastError = e.message; if(!silent) toast('Sheet sync failed: '+e.message, true); throw e; }
 }
 
@@ -2140,6 +2167,370 @@ function deleteDoc(id){
   };
 }
 
+/* ============================= TRANSACTIONS ============================= */
+/* Covers the full document lifecycle: Enquiry → Quotation → Purchase Order → Invoice →
+   Credit Note, plus Delivery Note as its own track. Adapted from a larger reference ERP's
+   Transactions module — scoped to the core workflow (party, line items with GST, status,
+   numbering, locking, print) rather than every specialised field of the original (e.g. its
+   exact per-category reference-type matrix and full revision-diff viewer are simplified
+   here to a single reference field and a stored revision history). */
+const TXN_CATEGORIES = {
+  ENQUIRY:       { label:'Enquiry',         prefix:'ENQ',  statuses:['Draft','Sent','Approved','Completed'], lockDirection:'Outgoing' },
+  QUOTATION:     { label:'Quotation',       prefix:'QUOT', statuses:['Draft','Sent','Approved','Completed'] },
+  PO:            { label:'Purchase Order',  prefix:'PO',   statuses:['Draft','Sent','Approved','Completed'] },
+  INVOICE:       { label:'Invoice',         prefix:'INV',  statuses:['Draft','Sent','Approved','Completed','Paid'] },
+  CREDIT_NOTE:   { label:'Credit Note',     prefix:'CN',   statuses:['Draft','Sent','Approved','Completed'] },
+  DELIVERY_NOTE: { label:'Delivery Note',   prefix:'DN',   statuses:['Issued','Acknowledged','Invoiced'] }
+};
+const TXN_LOCKED_STATUSES = ['Completed','Paid','Invoiced'];
+const TXN_REFERENCE_TYPES = ['Ref Email Dated','Ref Meeting Dated','Ref Enquiry Dated','Ref PO No','Ref Quotation No','Ref Invoice No','Ref Work Order','Ref Indent No','Ref RFQ No'];
+function txnIsLocked(t){ return TXN_LOCKED_STATUSES.includes(t.status) && !ORG.allowFinalisedTxnEdit; }
+/* Indian financial year short-form: "2627" for FY2026-27 (Apr 2026 – Mar 2027). */
+function currentFYShort(){
+  const now = new Date(); const y = now.getFullYear(); const m = now.getMonth()+1;
+  const startY = m>=4 ? y : y-1;
+  return String(startY).slice(-2) + String(startY+1).slice(-2);
+}
+function nextTxnNo(category){
+  const fy = currentFYShort();
+  const key = category+'-'+fy;
+  const seq = ORG.txnSeq[key]||1;
+  ORG.txnSeq[key] = seq+1;
+  const prefix = (ORG.txnPrefixes && ORG.txnPrefixes[category]) || TXN_CATEGORIES[category].prefix;
+  return `${prefix}${fy}${String(seq).padStart(3,'0')}`;
+}
+function calcLineAmount(item){ return (Number(item.qty)||0) * (Number(item.rate)||0); }
+function calcTxnTotals(txn){
+  const subtotal = (txn.items||[]).reduce((s,i)=> s+calcLineAmount(i), 0);
+  let cgst=0, sgst=0, igst=0;
+  (txn.items||[]).forEach(i=>{
+    const tax = calcLineAmount(i) * (Number(i.gstPct)||0) / 100;
+    if(txn.gstMode==='Inter') igst += tax;
+    else if(txn.gstMode==='Intra'){ cgst += tax/2; sgst += tax/2; }
+  });
+  const taxAmount = cgst+sgst+igst;
+  return { subtotal, cgst, sgst, igst, taxAmount, grandTotal: subtotal+taxAmount };
+}
+function txnStatusPill(status){
+  const cls = {Draft:'neutral',Sent:'accent',Approved:'good',Completed:'good',Paid:'good',Issued:'accent',Acknowledged:'good',Invoiced:'good'}[status]||'neutral';
+  return `<span class="pill ${cls}">${esc(status)}</span>`;
+}
+
+function renderTransactions(c, actions){
+  actions.innerHTML = `<button class="btn" id="newTxnBtn">+ New Transaction</button>`;
+  actions.querySelector('#newTxnBtn').onclick = ()=> openTxnForm();
+
+  const outstandingInvoices = TRANSACTIONS.filter(t=>t.txnCategory==='INVOICE' && t.status!=='Paid' && t.status!=='Draft');
+  const outstandingTotal = outstandingInvoices.reduce((s,t)=> s+(calcTxnTotals(t).grandTotal), 0);
+  const thisMonth = new Date().toISOString().slice(0,7);
+  const thisMonthCount = TRANSACTIONS.filter(t=> (t.txnDate||'').slice(0,7)===thisMonth).length;
+
+  c.innerHTML = `
+    <div class="stat-row">
+      <div class="stat" style="background:var(--g-blue);"><div class="n">${TRANSACTIONS.length}</div><div class="l"><span class="ic">📑</span>Total Transactions</div></div>
+      <div class="stat" style="background:var(--g-orange);"><div class="n">${thisMonthCount}</div><div class="l"><span class="ic">🗓️</span>This Month</div></div>
+      <div class="stat" style="background:var(--g-red);"><div class="n">${outstandingInvoices.length}</div><div class="l"><span class="ic">⏳</span>Unpaid Invoices</div></div>
+      <div class="stat" style="background:var(--g-green);"><div class="n">${money(outstandingTotal)}</div><div class="l"><span class="ic">💰</span>Outstanding Receivable</div></div>
+    </div>
+    <div class="card">
+      <h2>Transactions</h2>
+      <div class="grid cols-3" style="margin-top:10px;">
+        <div class="field"><label>Search</label><input type="text" id="txnSearch" placeholder="Txn no., party, reference, subject..."></div>
+        <div class="field"><label>Category</label><select id="txnCatFilter"><option value="">All Categories</option>${Object.entries(TXN_CATEGORIES).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select></div>
+        <div class="field"><label>Status</label><select id="txnStatusFilter"><option value="">All Statuses</option>${[...new Set(Object.values(TXN_CATEGORIES).flatMap(c=>c.statuses))].map(s=>`<option>${s}</option>`).join('')}</select></div>
+      </div>
+      <div id="txnGroupWrap"></div>
+    </div>
+  `;
+  function draw(){
+    const q = (document.getElementById('txnSearch').value||'').toLowerCase();
+    const cat = document.getElementById('txnCatFilter').value;
+    const st = document.getElementById('txnStatusFilter').value;
+    const filtered = TRANSACTIONS.filter(t=>{
+      const mq = !q || [t.txnNo,t.partyName,t.reference,t.subject].some(v=>(v||'').toLowerCase().includes(q));
+      const mc = !cat || t.txnCategory===cat;
+      const ms = !st || t.status===st;
+      return mq && mc && ms;
+    });
+    const wrap = document.getElementById('txnGroupWrap');
+    if(!filtered.length){ wrap.innerHTML = '<div class="empty"><div class="icon">📑</div>No transactions found.<div class="cta"><button class="btn" id="emptyNewTxn">+ New Transaction</button></div></div>'; document.getElementById('emptyNewTxn').onclick=()=>openTxnForm(); return; }
+    const groups = {};
+    filtered.forEach(t=> (groups[t.txnCategory] = groups[t.txnCategory]||[]).push(t));
+    wrap.innerHTML = Object.keys(TXN_CATEGORIES).filter(k=>groups[k]).map(k=>{
+      const list = groups[k].slice().sort((a,b)=> (b.txnDate||'').localeCompare(a.txnDate||''));
+      return `<div class="section-label" style="margin-top:16px;">${TXN_CATEGORIES[k].label} (${list.length})</div>
+      <table><thead><tr><th>Txn No.</th><th>Party</th><th>Date</th><th class="num-cell">Amount</th><th>Status</th><th></th></tr></thead><tbody>
+        ${list.map(t=>{ const tot = calcTxnTotals(t); return `<tr>
+          <td><b>${esc(t.txnNo)}</b>${t.revisionNo?` <span class="pill neutral">Rev-${t.revisionNo}</span>`:''}</td>
+          <td>${esc(t.partyName||'—')}</td><td>${esc(t.txnDate||'—')}</td>
+          <td class="num-cell">${money(tot.grandTotal)}</td><td>${txnStatusPill(t.status)}</td>
+          <td class="no-print" style="white-space:nowrap;">
+            <button class="btn secondary sm" data-view="${t.id}">View / Print</button>
+            <button class="btn secondary sm" data-edit="${t.id}">Edit</button>
+            <button class="btn danger sm" data-del="${t.id}">Delete</button>
+          </td></tr>`; }).join('')}
+      </tbody></table>`;
+    }).join('');
+    wrap.querySelectorAll('[data-view]').forEach(b=> b.onclick=()=>openTxnPrint(b.dataset.view));
+    wrap.querySelectorAll('[data-edit]').forEach(b=> b.onclick=()=>openTxnForm(b.dataset.edit));
+    wrap.querySelectorAll('[data-del]').forEach(b=> b.onclick=()=>deleteTxn(b.dataset.del));
+  }
+  ['txnSearch','txnCatFilter','txnStatusFilter'].forEach(id=> document.getElementById(id).addEventListener('input', draw));
+  draw();
+}
+
+let txnLineItems = [];
+function blankLineItem(){ return { id: uid(), description:'', hsn:'', qty:1, rate:0, gstPct:18 }; }
+function openTxnForm(txnId){
+  const isEdit = !!txnId;
+  const t = isEdit ? TRANSACTIONS.find(x=>x.id===txnId) : {
+    txnCategory:'', txnDirection:'Outgoing', partyId:'', txnDate:new Date().toISOString().slice(0,10),
+    dueDate:'', referenceType:'', reference:'', subject:'', status:'Draft', gstMode:'Intra',
+    poNumber:'', poDate:'', poTerms:'', panNumber:'', supplyDateTime:'', placeOfSupply:'', vehicleNo:'',
+    dnTransportMode:'Local', dnVehicleNo:'', dnPlaceOfDelivery:'', dnType:'Workshop', dnLinkedInvoice:'', dnSignedStatus:'Pending', dnDeliveryDateTime:'',
+    terms:'', notes:'', items:[blankLineItem()]
+  };
+  if(isEdit && txnIsLocked(t)){ toast(`This ${TXN_CATEGORIES[t.txnCategory].label.toLowerCase()} is finalised (${t.status}) and locked. Enable editing in Settings → Transactions if this needs correcting.`, true); return; }
+  const baseRev = Number(t._rev)||0;
+  txnLineItems = isEdit ? JSON.parse(JSON.stringify(t.items||[blankLineItem()])) : [blankLineItem()];
+
+  openModal(`
+    <div class="modal-head"><h3>${isEdit?'Edit':'New'} Transaction</h3><button class="modal-close" id="mClose">✕</button></div>
+    <form id="txnForm">
+      <div class="grid cols-3">
+        <div class="field"><label>Category</label><select name="txnCategory" id="txnCatSel" ${isEdit?'disabled':''}>
+          <option value="">— Select —</option>${Object.entries(TXN_CATEGORIES).map(([k,v])=>`<option value="${k}" ${t.txnCategory===k?'selected':''}>${v.label}</option>`).join('')}
+        </select>${isEdit?`<input type="hidden" name="txnCategory" value="${t.txnCategory}">`:''}</div>
+        <div class="field"><label>Direction</label><select name="txnDirection" id="txnDirSel"><option value="Outgoing" ${t.txnDirection==='Outgoing'?'selected':''}>Outgoing (we → party)</option><option value="Incoming" ${t.txnDirection==='Incoming'?'selected':''}>Incoming (party → us)</option></select></div>
+        <div class="field"><label>Status</label><select name="status" id="txnStatusSel"></select></div>
+      </div>
+      <div class="grid cols-3">
+        <div class="field"><label>Party</label><select name="partyId" id="txnPartySel"><option value="">— Select Party —</option>${PARTIES.map(p=>`<option value="${p.id}" ${t.partyId===p.id?'selected':''}>${esc(p.partyName)} (${esc(p.partyType)})</option>`).join('')}</select></div>
+        <div class="field"><label>Transaction Date</label><input type="date" name="txnDate" value="${esc(t.txnDate)}" required></div>
+        <div class="field"><label>Due Date</label><input type="date" name="dueDate" value="${esc(t.dueDate)}"></div>
+      </div>
+      <div class="grid cols-3">
+        <div class="field"><label>Reference Type</label><select name="referenceType"><option value="">— None —</option>${TXN_REFERENCE_TYPES.map(r=>`<option ${t.referenceType===r?'selected':''}>${r}</option>`).join('')}</select></div>
+        <div class="field"><label>Reference No. / Detail</label><input type="text" name="reference" value="${esc(t.reference)}"></div>
+        <div class="field"><label>Subject</label><input type="text" name="subject" value="${esc(t.subject)}"></div>
+      </div>
+      <div id="txnDetailFields"></div>
+      <div class="section-label" style="margin-top:14px;">GST</div>
+      <div class="grid cols-3">
+        <div class="field"><label>GST Mode</label><select name="gstMode" id="txnGstMode"><option value="None" ${t.gstMode==='None'?'selected':''}>None</option><option value="Intra" ${t.gstMode==='Intra'?'selected':''}>Intra-state (CGST + SGST)</option><option value="Inter" ${t.gstMode==='Inter'?'selected':''}>Inter-state (IGST)</option></select></div>
+      </div>
+      <div class="section-label" style="display:flex;align-items:center;justify-content:space-between;">
+        <span>Line Items</span><button type="button" class="btn secondary sm" id="addLineItem">+ Add Line</button>
+      </div>
+      <div id="lineItemsWrap"></div>
+      <div id="txnTotalsPreview"></div>
+      <div class="grid cols-2" style="margin-top:10px;">
+        <div class="field"><label>Terms &amp; Conditions</label><textarea name="terms" rows="2">${esc(t.terms)}</textarea></div>
+        <div class="field"><label>Notes</label><textarea name="notes" rows="2">${esc(t.notes)}</textarea></div>
+      </div>
+      <div class="btn-row"><button type="submit" class="btn">Save Transaction</button><button type="button" class="btn secondary" id="mCancel">Cancel</button></div>
+    </form>
+  `, true);
+  document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+
+  function statusOptionsFor(cat){
+    const statuses = cat ? TXN_CATEGORIES[cat].statuses : ['Draft'];
+    return statuses.map(s=>`<option ${t.status===s?'selected':''}>${s}</option>`).join('');
+  }
+  function detailFieldsFor(cat){
+    if(cat==='PO') return `
+      <div class="section-label">Purchase Order Details</div>
+      <div class="grid cols-3">
+        <div class="field"><label>PO Number</label><input type="text" name="poNumber" value="${esc(t.poNumber)}"></div>
+        <div class="field"><label>PO Date</label><input type="date" name="poDate" value="${esc(t.poDate)}"></div>
+      </div>
+      <div class="field"><label>PO Terms</label><textarea name="poTerms" rows="2">${esc(t.poTerms)}</textarea></div>`;
+    if(cat==='INVOICE') return `
+      <div class="section-label">Invoice Details</div>
+      <div class="grid cols-4">
+        <div class="field"><label>PAN Number</label><input type="text" name="panNumber" value="${esc(t.panNumber)}"></div>
+        <div class="field"><label>Supply Date/Time</label><input type="datetime-local" name="supplyDateTime" value="${esc(t.supplyDateTime)}"></div>
+        <div class="field"><label>Place of Supply</label><input type="text" name="placeOfSupply" value="${esc(t.placeOfSupply)}"></div>
+        <div class="field"><label>Vehicle No.</label><input type="text" name="vehicleNo" value="${esc(t.vehicleNo)}"></div>
+      </div>`;
+    if(cat==='DELIVERY_NOTE'){
+      const invoices = TRANSACTIONS.filter(x=>x.txnCategory==='INVOICE');
+      return `
+      <div class="section-label">Delivery Note Details</div>
+      <div class="grid cols-4">
+        <div class="field"><label>Transport Mode</label><select name="dnTransportMode"><option ${t.dnTransportMode==='Local'?'selected':''}>Local</option><option ${t.dnTransportMode==='Courier'?'selected':''}>Courier</option><option ${t.dnTransportMode==='Freight'?'selected':''}>Freight</option></select></div>
+        <div class="field"><label>Vehicle No.</label><input type="text" name="dnVehicleNo" value="${esc(t.dnVehicleNo)}"></div>
+        <div class="field"><label>Place of Delivery</label><input type="text" name="dnPlaceOfDelivery" value="${esc(t.dnPlaceOfDelivery)}"></div>
+        <div class="field"><label>Type</label><select name="dnType"><option ${t.dnType==='Workshop'?'selected':''}>Workshop</option><option ${t.dnType==='Site'?'selected':''}>Site</option></select></div>
+      </div>
+      <div class="grid cols-3">
+        <div class="field"><label>Linked Invoice</label><select name="dnLinkedInvoice"><option value="">— None —</option>${invoices.map(i=>`<option ${t.dnLinkedInvoice===i.txnNo?'selected':''}>${esc(i.txnNo)}</option>`).join('')}</select></div>
+        <div class="field"><label>Signed Status</label><select name="dnSignedStatus"><option ${t.dnSignedStatus==='Pending'?'selected':''}>Pending</option><option ${t.dnSignedStatus==='Signed'?'selected':''}>Signed</option></select></div>
+        <div class="field"><label>Delivery Date/Time</label><input type="datetime-local" name="dnDeliveryDateTime" value="${esc(t.dnDeliveryDateTime)}"></div>
+      </div>`;
+    }
+    return '';
+  }
+  function applyCategoryRules(){
+    const cat = document.getElementById('txnCatSel').value;
+    document.getElementById('txnStatusSel').innerHTML = statusOptionsFor(cat);
+    document.getElementById('txnDetailFields').innerHTML = detailFieldsFor(cat);
+    const dirSel = document.getElementById('txnDirSel');
+    if(cat==='ENQUIRY'){ dirSel.value='Outgoing'; dirSel.disabled=true; } else { dirSel.disabled=false; }
+  }
+  if(!isEdit) document.getElementById('txnCatSel').addEventListener('change', applyCategoryRules);
+  applyCategoryRules();
+
+  function drawLineItems(){
+    document.getElementById('lineItemsWrap').innerHTML = txnLineItems.map((li,i)=>`
+      <div class="grid cols-6" style="align-items:end;margin-bottom:6px;" data-line="${i}">
+        <div class="field" style="grid-column:span 2;margin-bottom:0;"><label>Description</label><input type="text" data-li="description" value="${esc(li.description)}"></div>
+        <div class="field" style="margin-bottom:0;"><label>HSN/SAC</label><input type="text" data-li="hsn" value="${esc(li.hsn)}"></div>
+        <div class="field" style="margin-bottom:0;"><label>Qty</label><input type="number" min="0" step="0.01" data-li="qty" value="${li.qty}"></div>
+        <div class="field" style="margin-bottom:0;"><label>Rate</label><input type="number" min="0" step="0.01" data-li="rate" value="${li.rate}"></div>
+        <div class="field" style="margin-bottom:0;display:flex;gap:6px;align-items:end;"><div style="flex:1;"><label>GST %</label><input type="number" min="0" step="0.01" data-li="gstPct" value="${li.gstPct}"></div><button type="button" class="btn danger sm" data-rmline="${i}">✕</button></div>
+      </div>`).join('');
+    document.querySelectorAll('[data-li]').forEach(inp=>{
+      inp.addEventListener('input', ()=>{
+        const idx = Number(inp.closest('[data-line]').dataset.line);
+        txnLineItems[idx][inp.dataset.li] = inp.dataset.li==='description'||inp.dataset.li==='hsn' ? inp.value : Number(inp.value)||0;
+        drawTotalsPreview();
+      });
+    });
+    document.querySelectorAll('[data-rmline]').forEach(b=> b.onclick=()=>{ txnLineItems.splice(Number(b.dataset.rmline),1); if(!txnLineItems.length) txnLineItems.push(blankLineItem()); drawLineItems(); drawTotalsPreview(); });
+  }
+  function drawTotalsPreview(){
+    const gstMode = document.getElementById('txnGstMode').value;
+    const tot = calcTxnTotals({ items:txnLineItems, gstMode });
+    document.getElementById('txnTotalsPreview').innerHTML = `
+      <div class="divider"></div>
+      <div class="grid cols-4">
+        <div><label>Subtotal</label><div><b>${money2(tot.subtotal)}</b></div></div>
+        ${gstMode==='Intra'?`<div><label>CGST</label><div>${money2(tot.cgst)}</div></div><div><label>SGST</label><div>${money2(tot.sgst)}</div></div>`:''}
+        ${gstMode==='Inter'?`<div><label>IGST</label><div>${money2(tot.igst)}</div></div>`:''}
+        <div><label>Grand Total</label><div><b>${money2(tot.grandTotal)}</b></div></div>
+      </div>`;
+  }
+  document.getElementById('addLineItem').onclick = ()=>{ txnLineItems.push(blankLineItem()); drawLineItems(); drawTotalsPreview(); };
+  document.getElementById('txnGstMode').addEventListener('change', drawTotalsPreview);
+  drawLineItems(); drawTotalsPreview();
+
+  document.getElementById('txnForm').onsubmit = async (ev)=>{
+    ev.preventDefault();
+    if(!document.getElementById('txnCatSel').value && !isEdit){ toast('Select a category.', true); return; }
+    if(isEdit){
+      const conflict = await checkRecordConflict('transactions', txnId, baseRev);
+      if(conflict){
+        conflictWarning(conflict._updatedBy, conflict._updatedAt,
+          ()=>{ const idx = TRANSACTIONS.findIndex(x=>x.id===txnId); if(idx>-1) TRANSACTIONS[idx]=conflict; openTxnForm(txnId); },
+          ()=> submitTxnForm(ev, isEdit, t));
+        return;
+      }
+    }
+    await submitTxnForm(ev, isEdit, t);
+  };
+}
+async function submitTxnForm(ev, isEdit, t){
+  const fd = new FormData(ev.target);
+  const party = PARTIES.find(p=>p.id===fd.get('partyId'));
+  const items = txnLineItems.filter(li=> li.description.trim() || Number(li.qty) || Number(li.rate));
+  const rec = {
+    id: t.id||uid(), txnCategory: fd.get('txnCategory'), txnDirection: fd.get('txnDirection'),
+    partyId: fd.get('partyId'), partyName: party?party.partyName:'',
+    txnDate: fd.get('txnDate'), dueDate: fd.get('dueDate'),
+    referenceType: fd.get('referenceType'), reference: fd.get('reference').trim(), subject: fd.get('subject').trim(),
+    status: fd.get('status'), gstMode: fd.get('gstMode'),
+    poNumber: fd.get('poNumber')||'', poDate: fd.get('poDate')||'', poTerms: fd.get('poTerms')||'',
+    panNumber: fd.get('panNumber')||'', supplyDateTime: fd.get('supplyDateTime')||'', placeOfSupply: fd.get('placeOfSupply')||'', vehicleNo: fd.get('vehicleNo')||'',
+    dnTransportMode: fd.get('dnTransportMode')||'', dnVehicleNo: fd.get('dnVehicleNo')||'', dnPlaceOfDelivery: fd.get('dnPlaceOfDelivery')||'',
+    dnType: fd.get('dnType')||'', dnLinkedInvoice: fd.get('dnLinkedInvoice')||'', dnSignedStatus: fd.get('dnSignedStatus')||'', dnDeliveryDateTime: fd.get('dnDeliveryDateTime')||'',
+    terms: fd.get('terms').trim(), notes: fd.get('notes').trim(), items,
+    revisionNo: t.revisionNo||0, revisionHistory: t.revisionHistory||[]
+  };
+  if(isEdit){
+    rec._rev = t._rev; rec.txnNo = t.txnNo;
+    // Keep a lightweight audit trail: snapshot the prior version before applying the new one.
+    rec.revisionHistory = (t.revisionHistory||[]).concat([{ snapshotAt:new Date().toISOString(), by:currentStaffName(), status:t.status, items:t.items, terms:t.terms }]);
+    rec.revisionNo = (t.revisionNo||0)+1;
+  } else {
+    rec.txnNo = nextTxnNo(rec.txnCategory);
+    await saveOrg();
+  }
+  tagRecord(rec, !isEdit);
+  if(isEdit){ const idx = TRANSACTIONS.findIndex(x=>x.id===t.id); TRANSACTIONS[idx]=rec; } else { TRANSACTIONS.push(rec); }
+  await saveTransactions();
+  closeModal(); toast(isEdit?'Transaction updated.':`${rec.txnNo} created.`); render();
+}
+function deleteTxn(id){
+  const t = TRANSACTIONS.find(x=>x.id===id); if(!t) return;
+  if(txnIsLocked(t)){ toast(`This ${TXN_CATEGORIES[t.txnCategory].label.toLowerCase()} is finalised (${t.status}) and locked. Enable editing in Settings → Transactions if this needs correcting.`, true); return; }
+  openModal(`
+    <div class="modal-head"><h3>Delete Transaction</h3><button class="modal-close" id="mClose">✕</button></div>
+    <p>Delete <b>${esc(t.txnNo)}</b> (${esc(t.partyName)})? This cannot be undone.</p>
+    <div class="btn-row"><button class="btn danger" id="confirmDelTxn">Delete</button><button class="btn secondary" id="mCancel">Cancel</button></div>
+  `);
+  document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+  document.getElementById('confirmDelTxn').onclick = async ()=>{
+    TRANSACTIONS = TRANSACTIONS.filter(x=>x.id!==id); recordTombstone('transactions', id);
+    await saveTransactions(); closeModal(); toast('Transaction deleted.'); render();
+  };
+}
+function openTxnPrint(id){
+  const t = TRANSACTIONS.find(x=>x.id===id); if(!t) return;
+  const party = PARTIES.find(p=>p.id===t.partyId);
+  const tot = calcTxnTotals(t);
+  const meta = TXN_CATEGORIES[t.txnCategory];
+  const logoHtml = ORG.logo ? `<img src="${ORG.logo}">` : (ORG.companyName||'C').charAt(0).toUpperCase();
+  const detailRows = [
+    t.poNumber && ['PO NUMBER', t.poNumber, 'PO DATE', t.poDate],
+    t.panNumber && ['PAN NUMBER', t.panNumber, 'PLACE OF SUPPLY', t.placeOfSupply],
+    t.vehicleNo && ['VEHICLE NO.', t.vehicleNo, 'SUPPLY DATE/TIME', t.supplyDateTime],
+    t.txnCategory==='DELIVERY_NOTE' && ['TRANSPORT MODE', t.dnTransportMode, 'PLACE OF DELIVERY', t.dnPlaceOfDelivery],
+    t.txnCategory==='DELIVERY_NOTE' && ['DELIVERY VEHICLE', t.dnVehicleNo, 'SIGNED STATUS', t.dnSignedStatus],
+  ].filter(Boolean);
+  const html = `
+    <div class="modal-head no-print"><h3>${esc(t.txnNo)}</h3><button class="modal-close" id="mClose">✕</button></div>
+    <div id="printArea">
+      <div class="payslip">
+        <div class="payslip-top">
+          <div class="logo">${logoHtml}</div>
+          <div class="conameblock"><div class="coname">${esc((ORG.companyName||'YOUR COMPANY').toUpperCase())}</div></div>
+          <div style="width:66px;"></div>
+        </div>
+        <div class="payslip-addr">${esc(ORG.address||'')}${ORG.tel?(' &nbsp;Tel: '+esc(ORG.tel)):''}${ORG.email?(' , Email: '+esc(ORG.email)):''}${ORG.gstin?(' , GSTIN: '+esc(ORG.gstin)):''}</div>
+        <div class="payslip-title">${meta.label.toUpperCase()} — ${esc(t.txnNo)}</div>
+        <table class="pstable">
+          <tr><td class="lbl">PARTY</td><td class="val">${esc(t.partyName||'—')}</td><td class="lbl">DIRECTION</td><td class="val">${esc(t.txnDirection)}</td></tr>
+          <tr><td class="lbl">DATE</td><td class="val">${esc(t.txnDate||'—')}</td><td class="lbl">DUE DATE</td><td class="val">${esc(t.dueDate||'—')}</td></tr>
+          <tr><td class="lbl">REFERENCE</td><td class="val">${esc(t.referenceType||'')} ${esc(t.reference||'')}</td><td class="lbl">STATUS</td><td class="val">${esc(t.status)}</td></tr>
+          ${t.subject?`<tr><td class="lbl">SUBJECT</td><td class="val" colspan="3">${esc(t.subject)}</td></tr>`:''}
+          ${party?`<tr><td class="lbl">PARTY GST / PAN</td><td class="val">${esc(party.gstNumber||'—')} / ${esc(party.panNumber||'—')}</td><td class="lbl">PARTY ADDRESS</td><td class="val">${esc(party.address||'—')}</td></tr>`:''}
+          ${detailRows.map(r=>`<tr><td class="lbl">${esc(r[0])}</td><td class="val">${esc(r[1]||'—')}</td><td class="lbl">${esc(r[2])}</td><td class="val">${esc(r[3]||'—')}</td></tr>`).join('')}
+        </table>
+        <table class="pstable" style="margin-top:-1px;">
+          <tr class="earnhead"><td>DESCRIPTION</td><td>HSN/SAC</td><td>QTY</td><td>RATE</td><td>GST%</td><td class="amtcell">AMOUNT</td></tr>
+          ${(t.items||[]).map(li=>`<tr><td class="val">${esc(li.description)}</td><td class="val">${esc(li.hsn||'—')}</td><td class="val">${li.qty}</td><td class="val amtcell">${money2(li.rate)}</td><td class="val">${li.gstPct}%</td><td class="val amtcell">${money2(calcLineAmount(li))}</td></tr>`).join('')}
+          <tr class="totrow"><td colspan="5">SUBTOTAL</td><td class="amtcell">${money2(tot.subtotal)}</td></tr>
+          ${t.gstMode==='Intra'?`<tr><td colspan="5">CGST</td><td class="amtcell">${money2(tot.cgst)}</td></tr><tr><td colspan="5">SGST</td><td class="amtcell">${money2(tot.sgst)}</td></tr>`:''}
+          ${t.gstMode==='Inter'?`<tr><td colspan="5">IGST</td><td class="amtcell">${money2(tot.igst)}</td></tr>`:''}
+          <tr class="netrow"><td colspan="5">GRAND TOTAL</td><td class="amtcell">${money2(tot.grandTotal)}</td></tr>
+          <tr class="wordsrow"><td colspan="6"><span class="wlabel">Amount in words:</span> ${esc(rupeesInWords(tot.grandTotal))}</td></tr>
+        </table>
+        ${t.terms?`<div class="regime-note"><b>Terms &amp; Conditions:</b> ${esc(t.terms)}</div>`:''}
+        ${t.notes?`<div class="regime-note"><b>Notes:</b> ${esc(t.notes)}</div>`:''}
+        <div class="payslip-foot"><span>${esc(t.txnNo)}${t.revisionNo?' — Revision '+t.revisionNo:''}</span><span>ELECTRONIC DOCUMENT</span></div>
+      </div>
+    </div>
+    <div class="btn-row no-print" style="margin-top:16px;">
+      <button class="btn" id="printBtn">🖨️ Print / Save as PDF</button>
+      <button class="btn secondary" id="mCancel">Close</button>
+    </div>
+  `;
+  openModal(html, true);
+  document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+  document.getElementById('printBtn').onclick = ()=> window.print();
+}
+
 /* ============================= BACKUP & RESTORE ============================= */
 function renderBackup(c, actions){
   c.innerHTML = `
@@ -2161,7 +2552,7 @@ function renderBackup(c, actions){
 }
 async function doExport(){
   for(const e of EMPLOYEES){ await loadCompliance(e.id); }
-  const payload = { exportedAt: new Date().toISOString(), app: 'Valles EASY EMS', version: 2, org: ORG, employees: EMPLOYEES, payslips: PAYSLIPS, compliance: COMPLIANCE, parties: PARTIES, documents: COMPANY_DOCS };
+  const payload = { exportedAt: new Date().toISOString(), app: 'Valles EASY EMS', version: 2, org: ORG, employees: EMPLOYEES, payslips: PAYSLIPS, compliance: COMPLIANCE, parties: PARTIES, documents: COMPANY_DOCS, transactions: TRANSACTIONS };
   const blob = new Blob([JSON.stringify(payload,null,2)], {type:'application/json'});
   const url = URL.createObjectURL(blob); const a = document.createElement('a');
   a.href = url; a.download = `valles-easy-ems-backup-${new Date().toISOString().slice(0,10)}.json`;
@@ -2181,8 +2572,8 @@ function doRestore(file){
     document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
     document.getElementById('confirmRestore').onclick = async ()=>{
       ORG = data.org; EMPLOYEES = data.employees||[]; PAYSLIPS = data.payslips||[]; COMPLIANCE = data.compliance||{};
-      PARTIES = data.parties||[]; COMPANY_DOCS = data.documents||[];
-      await saveOrg(); await saveEmployees(); await savePayslips(); await saveParties(); await saveCompanyDocs();
+      PARTIES = data.parties||[]; COMPANY_DOCS = data.documents||[]; TRANSACTIONS = data.transactions||[];
+      await saveOrg(); await saveEmployees(); await savePayslips(); await saveParties(); await saveCompanyDocs(); await saveTransactions();
       for(const empId of Object.keys(COMPLIANCE)){ await saveCompliance(empId); }
       refreshBrand(); closeModal(); toast('Backup restored.'); updateDocBadge(); setTab('dashboard');
     };
@@ -2233,6 +2624,7 @@ function renderSettings(c, actions){
           <div class="field"><label>CIN</label><input type="text" name="cin" value="${esc(ORG.cin)}"></div>
           <div class="field"><label>Company PAN</label><input type="text" name="pan" value="${esc(ORG.pan)}"></div>
           <div class="field"><label>TAN</label><input type="text" name="tan" value="${esc(ORG.tan)}"></div>
+          <div class="field"><label>Company GSTIN</label><input type="text" name="gstin" value="${esc(ORG.gstin)}"></div>
           <div class="field"><label>Phone</label><input type="text" name="tel" value="${esc(ORG.tel)}"></div>
           <div class="field"><label>Email</label><input type="text" name="email" value="${esc(ORG.email)}"></div>
         </div>
@@ -2252,6 +2644,19 @@ function renderSettings(c, actions){
         <div class="field"><label>Branch</label><input type="text" name="bankBranch" value="${esc(ORG.bankBranch)}"></div>
         <div class="btn-row"><button type="submit" class="btn">Save Company Details</button></div>
       </form>
+    </div>
+
+    <div class="card">
+      <h2>Transactions</h2>
+      <p style="color:var(--muted);font-size:13px;">Finalised transactions (Completed, Paid, or Invoiced) are locked for audit safety — no edit or delete — unless this is switched on.</p>
+      <div class="field"><label class="checkline"><input type="checkbox" id="allowTxnEditChk" ${ORG.allowFinalisedTxnEdit?'checked':''}> Allow editing/deleting finalised transactions</label></div>
+      <div class="section-label" style="margin-top:14px;">Numbering Prefixes</div>
+      <p class="hint" style="margin:-4px 0 8px;">Format: PREFIX + Financial Year (e.g. 2627 for FY2026-27) + 3-digit sequence — e.g. <b>${esc(ORG.txnPrefixes.QUOTATION||'QTE')}${currentFYShort()}001</b>. Sequence resets automatically each financial year.</p>
+      <div class="grid cols-3">
+        ${Object.entries(TXN_CATEGORIES).map(([k,v])=>`<div class="field"><label>${v.label}</label><input type="text" maxlength="4" data-prefix="${k}" value="${esc(ORG.txnPrefixes[k]||v.prefix)}" style="text-transform:uppercase;"></div>`).join('')}
+      </div>
+      <div class="btn-row"><button class="btn secondary sm" id="saveTxnSettings">Save</button></div>
+      <p class="hint" style="margin-top:10px;">Next transaction numbers: ${Object.entries(TXN_CATEGORIES).map(([k,v])=>{ const fy=currentFYShort(); const prefix=ORG.txnPrefixes[k]||v.prefix; const seq=ORG.txnSeq[k+'-'+fy]||1; return `${v.label} ${prefix}${fy}${String(seq).padStart(3,'0')}`; }).join(' · ')}</p>
     </div>
 
     <div class="card">
@@ -2373,7 +2778,7 @@ function renderSettings(c, actions){
   `;
   document.getElementById('orgForm').onsubmit = async (ev)=>{
     ev.preventDefault(); const fd = new FormData(ev.target);
-    ['companyName','cin','pan','tan','tel','email','address','bankName','bankAccNo','bankIFSC','bankBranch'].forEach(k=> ORG[k] = fd.get(k) ? fd.get(k).trim() : '');
+    ['companyName','cin','pan','tan','gstin','tel','email','address','bankName','bankAccNo','bankIFSC','bankBranch'].forEach(k=> ORG[k] = fd.get(k) ? fd.get(k).trim() : '');
     await saveOrg(); refreshBrand(); toast('Company details saved.');
   };
   const logoDrop = document.getElementById('logoDrop'); logoDrop.onclick = ()=> document.getElementById('logoInput').click();
@@ -2383,6 +2788,15 @@ function renderSettings(c, actions){
   };
   const rmLogo = document.getElementById('removeLogo');
   if(rmLogo) rmLogo.onclick = async ()=>{ ORG.logo=''; await saveOrg(); refreshBrand(); renderSettings(c,actions); };
+  const saveTxnBtn = document.getElementById('saveTxnSettings');
+  if(saveTxnBtn) saveTxnBtn.onclick = async ()=>{
+    ORG.allowFinalisedTxnEdit = document.getElementById('allowTxnEditChk').checked;
+    document.querySelectorAll('[data-prefix]').forEach(inp=>{
+      const v = inp.value.trim().toUpperCase();
+      if(v) ORG.txnPrefixes[inp.dataset.prefix] = v;
+    });
+    await saveOrg(); toast('Transaction settings saved.'); renderSettings(c,actions);
+  };
 
   function drawSlabs(){
     document.getElementById('ptSlabWrap').innerHTML = ORG.ptSlabs.map((s,i)=>`
