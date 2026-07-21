@@ -249,8 +249,18 @@ const LS_KEY = 'vallesEasyEmsData_v1';
 let LOCAL = null;
 function ensureLocal(){
   if(LOCAL) return LOCAL;
-  try{ const raw = localStorage.getItem(LS_KEY); LOCAL = raw ? JSON.parse(raw) : {}; }
-  catch(e){ LOCAL = {}; }
+  try{
+    const raw = localStorage.getItem(LS_KEY);
+    LOCAL = raw ? JSON.parse(raw) : {};
+  }catch(e){
+    /* This should never happen — but if the saved data is ever unreadable, silently
+       resetting to blank would look exactly like "all my data vanished" with zero
+       explanation. So instead: preserve the unreadable copy under a recovery key and
+       warn loudly, rather than discarding it. */
+    try{ localStorage.setItem(LS_KEY+'_corrupt_backup_'+Date.now(), localStorage.getItem(LS_KEY)||''); }catch(e2){}
+    LOCAL = {};
+    setTimeout(()=> toast('⚠ Saved data could not be read and was reset — this should not normally happen. An unreadable copy was preserved in this browser; restore from Google Drive or contact support before making further changes.', true), 400);
+  }
   if(!LOCAL.compliance) LOCAL.compliance = {};
   if(!LOCAL.tombstones) LOCAL.tombstones = {};
   return LOCAL;
@@ -432,9 +442,13 @@ async function sha256(text){
 }
 
 /* ============================= LOAD / SAVE ============================= */
-async function loadAll(){
-  ORG = await getJSON('org-profile', null);
-  if(!ORG){ ORG = JSON.parse(JSON.stringify(DEFAULT_ORG)); }
+/* Fills in any org-profile fields that didn't exist yet when a given ORG object was last
+   saved (older app version, older backup file, etc.) with sensible defaults. Must run
+   after EVERY path that can replace ORG wholesale — initial load AND both restore flows —
+   or code that assumes a field exists (e.g. Settings rendering ORG.chartOfAccounts) throws
+   and the tab appears to silently fail to open. */
+function backfillOrgDefaults(){
+  if(!ORG){ ORG = JSON.parse(JSON.stringify(DEFAULT_ORG)); return; }
   if(!ORG.gdrive) ORG.gdrive = JSON.parse(JSON.stringify(DEFAULT_ORG.gdrive));
   if(ORG.gdrive.pinnedFolderId===undefined) ORG.gdrive.pinnedFolderId = '';
   if(ORG.gdrive.pinnedSheetId===undefined) ORG.gdrive.pinnedSheetId = '';
@@ -449,6 +463,12 @@ async function loadAll(){
   if(!ORG.chartOfAccounts) ORG.chartOfAccounts = JSON.parse(JSON.stringify(DEFAULT_ORG.chartOfAccounts));
   if(ORG.allowFinalisedTxnEdit===undefined) ORG.allowFinalisedTxnEdit = false;
   if(ORG.gstin===undefined) ORG.gstin = '';
+  /* Add new org-profile fields here going forward, not just in DEFAULT_ORG — this function
+     is the one place that has to know about all of them. */
+}
+async function loadAll(){
+  ORG = await getJSON('org-profile', null);
+  backfillOrgDefaults();
   EMPLOYEES = await getJSON('employees', []);
   // migrate legacy records that still have a flat `salary` object instead of salaryHistory
   EMPLOYEES.forEach(e=>{
@@ -1700,6 +1720,7 @@ async function driveRestoreBackup(fileId, label){
       if(!data.org || !data.employees){ toast('That backup file looks invalid.', true); return; }
       const gdriveKeep = ORG.gdrive;
       ORG = data.org; ORG.gdrive = gdriveKeep;
+      backfillOrgDefaults();
       EMPLOYEES = data.employees||[]; PAYSLIPS = data.payslips||[]; COMPLIANCE = data.compliance||{};
       PARTIES = data.parties||[]; COMPANY_DOCS = data.documents||[]; TRANSACTIONS = data.transactions||[]; EXPENSES = data.expenses||[];
       await saveOrg(); await saveEmployees(); await savePayslips(); await saveParties(); await saveCompanyDocs(); await saveTransactions(); await saveExpenses();
@@ -3019,7 +3040,9 @@ function doRestore(file){
     `);
     document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
     document.getElementById('confirmRestore').onclick = async ()=>{
-      ORG = data.org; EMPLOYEES = data.employees||[]; PAYSLIPS = data.payslips||[]; COMPLIANCE = data.compliance||{};
+      ORG = data.org;
+      backfillOrgDefaults();
+      EMPLOYEES = data.employees||[]; PAYSLIPS = data.payslips||[]; COMPLIANCE = data.compliance||{};
       PARTIES = data.parties||[]; COMPANY_DOCS = data.documents||[]; TRANSACTIONS = data.transactions||[]; EXPENSES = data.expenses||[];
       await saveOrg(); await saveEmployees(); await savePayslips(); await saveParties(); await saveCompanyDocs(); await saveTransactions(); await saveExpenses();
       for(const empId of Object.keys(COMPLIANCE)){ await saveCompliance(empId); }
