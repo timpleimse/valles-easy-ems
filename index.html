@@ -1549,7 +1549,7 @@ function initGis(){
       ORG.gdrive.connected = true; await saveOrg();
       toast('Google Drive connected.');
       ensureStaffName();
-      try{ await driveSetup(); await driveSyncNow(); }catch(e){}
+      try{ await driveReconcileOnConnect(); await driveSyncNow(); }catch(e){}
       startAutoSyncLoop();
       if(activeTab==='settings') renderSettings(document.getElementById('content'), document.getElementById('tabActions'));
     }
@@ -1627,6 +1627,82 @@ async function driveSetup(){
   await saveOrgSilent();
 }
 async function saveOrgSilent(){ ensureLocal(); LOCAL.org = ORG; try{ localStorage.setItem(LS_KEY, JSON.stringify(LOCAL)); }catch(e){} }
+/* Finds the existing live data.json by name within the Drive folder if this device doesn't
+   already have its ID cached — same fix already applied to the Sheet lookup, applied here
+   too. Without this, every fresh device that connects would create its OWN separate
+   data.json instead of finding the one that already exists, silently diverging forever. */
+async function driveEnsureDataFile(){
+  if(ORG.gdrive.fileId) return ORG.gdrive.fileId;
+  if(!ORG.gdrive.folderId) await driveSetup();
+  try{
+    const q = encodeURIComponent(`name='data.json' and mimeType='application/json' and trashed=false and '${ORG.gdrive.folderId}' in parents`);
+    const res = await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`);
+    const data = await res.json();
+    if(data.files && data.files.length){ ORG.gdrive.fileId = data.files[0].id; await saveOrgSilent(); }
+  }catch(e){}
+  return ORG.gdrive.fileId;
+}
+function totalRecordCount(payload){
+  return (payload.employees||[]).length + (payload.payslips||[]).length + (payload.parties||[]).length +
+    (payload.documents||[]).length + (payload.transactions||[]).length + (payload.expenses||[]).length;
+}
+/* Shared by every restore path (Drive backup restore, manual JSON restore, and first-connect
+   auto-import) so they can never drift out of sync with each other. */
+async function applyRestoredPayload(data){
+  const gdriveKeep = ORG.gdrive;
+  ORG = data.org || ORG; ORG.gdrive = gdriveKeep;
+  backfillOrgDefaults();
+  EMPLOYEES = data.employees||[]; PAYSLIPS = data.payslips||[]; COMPLIANCE = data.compliance||{};
+  PARTIES = data.parties||[]; COMPANY_DOCS = data.documents||[]; TRANSACTIONS = data.transactions||[]; EXPENSES = data.expenses||[];
+  await saveOrg(); await saveEmployees(); await savePayslips(); await saveParties(); await saveCompanyDocs(); await saveTransactions(); await saveExpenses();
+  for(const empId of Object.keys(COMPLIANCE)){ await saveCompliance(empId); }
+  refreshBrand(); updateDocBadge();
+}
+/* The core of a workable multi-device setup: run once right after a device connects to
+   Drive for the first time, BEFORE any push happens. Finds whatever's already in Drive and
+   decides what to do based on what's on each side — rather than blindly pushing this
+   device's state (which, for a fresh device, is empty, and would previously have created a
+   confusing duplicate data.json instead of finding the real one). */
+async function driveReconcileOnConnect(){
+  if(!ORG.gdrive.folderId) await driveSetup();
+  await driveEnsureDataFile();
+  if(!ORG.gdrive.fileId) return; // nothing in Drive yet — genuinely first-ever setup, push local as-is
+  let remote = null;
+  try{
+    const res = await driveFetch(`https://www.googleapis.com/drive/v3/files/${ORG.gdrive.fileId}?alt=media`);
+    if(res.ok) remote = await res.json();
+  }catch(e){}
+  if(!remote) return;
+  const localCount = totalRecordCount({ employees:EMPLOYEES, payslips:PAYSLIPS, parties:PARTIES, documents:COMPANY_DOCS, transactions:TRANSACTIONS, expenses:EXPENSES });
+  const remoteCount = totalRecordCount(remote);
+  if(localCount===0 && remoteCount>0){
+    await applyRestoredPayload(remote);
+    toast(`Imported existing company data from Google Drive (${remoteCount} records) into this device.`);
+  } else if(localCount>0 && remoteCount>0){
+    showReconcileChoiceModal(remote, localCount, remoteCount);
+  }
+  // localCount>0 && remoteCount===0, or both zero: nothing to reconcile — proceed normally.
+}
+function showReconcileChoiceModal(remotePayload, localCount, remoteCount){
+  openModal(`
+    <div class="modal-head"><h3>⚠️ Both This Device and Google Drive Have Data</h3></div>
+    <p>This device has <b>${localCount}</b> record(s) that have never synced, and Google Drive already has <b>${remoteCount}</b> record(s) saved from elsewhere. Pick how to proceed — auto-merging isn't safe here, since it isn't clear which side is current.</p>
+    <div class="btn-row" style="flex-direction:column;align-items:stretch;gap:8px;">
+      <button class="btn" id="rcUseDrive">Use Google Drive's data — discard what's on this device</button>
+      <button class="btn danger" id="rcUseLocal">Keep this device's data — overwrite Google Drive</button>
+      <button class="btn secondary" id="rcCancel">Cancel — disconnect, so I can back this device up first</button>
+    </div>
+  `, true);
+  document.getElementById('rcUseDrive').onclick = async ()=>{
+    await applyRestoredPayload(remotePayload); closeModal(); toast("Imported Google Drive's data. This device's unsynced data was discarded."); render();
+  };
+  document.getElementById('rcUseLocal').onclick = async ()=>{
+    closeModal(); toast("Keeping this device's data — pushing it to Google Drive now."); await driveSyncNow(); render();
+  };
+  document.getElementById('rcCancel').onclick = async ()=>{
+    await disconnectDrive(); closeModal(); toast('Disconnected. Use Backup → Download JSON to save this device\u2019s data before reconnecting.');
+  };
+}
 async function driveUploadJson(name, parentId, contentObj, existingFileId){
   const metadata = { name, mimeType:'application/json' };
   if(!existingFileId && parentId) metadata.parents = [parentId];
@@ -1658,6 +1734,7 @@ async function driveSyncNow(){
   driveBusy = true;
   try{
     if(!ORG.gdrive.folderId) await driveSetup();
+    await driveEnsureDataFile();
     const result = await driveUploadJson('data.json', ORG.gdrive.folderId, buildPayload(), ORG.gdrive.fileId);
     if(result && result.id){ ORG.gdrive.fileId = result.id; ORG.gdrive.lastSynced = new Date().toISOString(); driveLastError = null; await saveOrgSilent(); }
     try{ await driveExportSheet(true); driveLastError = null; }
@@ -1718,14 +1795,8 @@ async function driveRestoreBackup(fileId, label){
       const res = await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
       const data = await res.json();
       if(!data.org || !data.employees){ toast('That backup file looks invalid.', true); return; }
-      const gdriveKeep = ORG.gdrive;
-      ORG = data.org; ORG.gdrive = gdriveKeep;
-      backfillOrgDefaults();
-      EMPLOYEES = data.employees||[]; PAYSLIPS = data.payslips||[]; COMPLIANCE = data.compliance||{};
-      PARTIES = data.parties||[]; COMPANY_DOCS = data.documents||[]; TRANSACTIONS = data.transactions||[]; EXPENSES = data.expenses||[];
-      await saveOrg(); await saveEmployees(); await savePayslips(); await saveParties(); await saveCompanyDocs(); await saveTransactions(); await saveExpenses();
-      for(const empId of Object.keys(COMPLIANCE)){ await saveCompliance(empId); }
-      refreshBrand(); closeModal(); toast('Restored from Google Drive backup.'); updateDocBadge(); setTab('dashboard');
+      await applyRestoredPayload(data);
+      closeModal(); toast('Restored from Google Drive backup.'); setTab('dashboard');
     }catch(e){ toast('Restore failed.', true); }
   };
 }
@@ -3040,13 +3111,8 @@ function doRestore(file){
     `);
     document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
     document.getElementById('confirmRestore').onclick = async ()=>{
-      ORG = data.org;
-      backfillOrgDefaults();
-      EMPLOYEES = data.employees||[]; PAYSLIPS = data.payslips||[]; COMPLIANCE = data.compliance||{};
-      PARTIES = data.parties||[]; COMPANY_DOCS = data.documents||[]; TRANSACTIONS = data.transactions||[]; EXPENSES = data.expenses||[];
-      await saveOrg(); await saveEmployees(); await savePayslips(); await saveParties(); await saveCompanyDocs(); await saveTransactions(); await saveExpenses();
-      for(const empId of Object.keys(COMPLIANCE)){ await saveCompliance(empId); }
-      refreshBrand(); closeModal(); toast('Backup restored.'); updateDocBadge(); setTab('dashboard');
+      await applyRestoredPayload(data);
+      closeModal(); toast('Backup restored.'); setTab('dashboard');
     };
   };
   reader.readAsText(file);
