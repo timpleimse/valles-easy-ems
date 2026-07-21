@@ -209,6 +209,7 @@
       <button class="nav-item" data-tab="compliance"><span class="ic">🛡️</span>Compliance<span class="badge" id="compBadge" style="display:none;">0</span></button>
       <button class="nav-item" data-tab="parties"><span class="ic">🤝</span>Parties</button>
       <button class="nav-item" data-tab="transactions"><span class="ic">📑</span>Transactions</button>
+      <button class="nav-item" data-tab="expenses"><span class="ic">🧾</span>Bills &amp; Expenses</button>
       <button class="nav-item" data-tab="documents"><span class="ic">📄</span>Documents<span class="badge" id="docBadge" style="display:none;">0</span></button>
       <button class="nav-item" data-tab="backup"><span class="ic">📦</span>Backup</button>
       <button class="nav-item" data-tab="settings"><span class="ic">🔒</span>Settings</button>
@@ -268,6 +269,7 @@ async function getJSON(key, def){
   if(key==='parties') return LOCAL.parties!=null ? LOCAL.parties : def;
   if(key==='documents') return LOCAL.documents!=null ? LOCAL.documents : def;
   if(key==='transactions') return LOCAL.transactions!=null ? LOCAL.transactions : def;
+  if(key==='expenses') return LOCAL.expenses!=null ? LOCAL.expenses : def;
   if(key.indexOf('compliance:')===0){ const v = LOCAL.compliance[key.slice(11)]; return v!=null ? v : def; }
   return def;
 }
@@ -279,6 +281,7 @@ async function setJSON(key, value){
   else if(key==='parties') LOCAL.parties = value;
   else if(key==='documents') LOCAL.documents = value;
   else if(key==='transactions') LOCAL.transactions = value;
+  else if(key==='expenses') LOCAL.expenses = value;
   else if(key.indexOf('compliance:')===0){ LOCAL.compliance[key.slice(11)] = value; }
   try{ localStorage.setItem(LS_KEY, JSON.stringify(LOCAL)); }
   catch(e){ toast('Local save failed — browser storage may be full. Try removing large documents.', true); return false; }
@@ -289,11 +292,11 @@ function buildPayload(){
   ensureLocal();
   return { app:'Valles EASY EMS', version:2, savedAt:new Date().toISOString(),
     org:ORG, employees:EMPLOYEES, payslips:PAYSLIPS, compliance:COMPLIANCE,
-    parties:PARTIES, documents:COMPANY_DOCS, transactions:TRANSACTIONS, tombstones:LOCAL.tombstones };
+    parties:PARTIES, documents:COMPANY_DOCS, transactions:TRANSACTIONS, expenses:EXPENSES, tombstones:LOCAL.tombstones };
 }
 
 /* ============================= STATE ============================= */
-let ORG = null, EMPLOYEES = [], PAYSLIPS = [], COMPLIANCE = {}, PARTIES = [], COMPANY_DOCS = [], TRANSACTIONS = [];
+let ORG = null, EMPLOYEES = [], PAYSLIPS = [], COMPLIANCE = {}, PARTIES = [], COMPANY_DOCS = [], TRANSACTIONS = [], EXPENSES = [];
 let settingsUnlocked = false;
 let activeTab = 'dashboard';
 
@@ -329,6 +332,31 @@ const DEFAULT_ORG = {
   /* 3-letter codes used in transaction numbers, e.g. QTE2627001 = QTE + FY2026-27 + seq 001.
      Editable in Settings → Transactions. */
   txnPrefixes: { ENQUIRY:'ENQ', QUOTATION:'QTE', PO:'POR', INVOICE:'INV', CREDIT_NOTE:'CRN', DELIVERY_NOTE:'DCN' },
+  expPrefix: 'EXP', expSeq: {}, allowFinalisedExpenseEdit: false,
+  /* Chart of Accounts — a shared reference list for tagging bills to a ledger account.
+     Optional/additive; safe to leave a bill untagged. Editable in Settings. */
+  chartOfAccounts: [
+    { id:'COA-1000', code:'1000', name:'Cash in Hand',              type:'Asset',     active:true },
+    { id:'COA-1100', code:'1100', name:'Bank Accounts',             type:'Asset',     active:true },
+    { id:'COA-1200', code:'1200', name:'Sundry Debtors (AR)',       type:'Asset',     active:true },
+    { id:'COA-1300', code:'1300', name:'TDS Receivable',            type:'Asset',     active:true },
+    { id:'COA-1400', code:'1400', name:'GST ITC Receivable',        type:'Asset',     active:true },
+    { id:'COA-2000', code:'2000', name:'Sundry Creditors (AP)',     type:'Liability', active:true },
+    { id:'COA-2100', code:'2100', name:'GST Payable',               type:'Liability', active:true },
+    { id:'COA-2200', code:'2200', name:'TDS Payable',                type:'Liability', active:true },
+    { id:'COA-2300', code:'2300', name:'ESIC Payable',              type:'Liability', active:true },
+    { id:'COA-3000', code:'3000', name:"Director's Current Account",type:'Equity',    active:true },
+    { id:'COA-3100', code:'3100', name:'Capital',                   type:'Equity',    active:true },
+    { id:'COA-4000', code:'4000', name:'Service Income',            type:'Income',    active:true },
+    { id:'COA-5000', code:'5000', name:'Salaries & Wages',          type:'Expense',   active:true },
+    { id:'COA-5100', code:'5100', name:'Food Expenses',             type:'Expense',   active:true },
+    { id:'COA-5200', code:'5200', name:'Travelling Expenses',       type:'Expense',   active:true },
+    { id:'COA-5300', code:'5300', name:'Staff Welfare',             type:'Expense',   active:true },
+    { id:'COA-5400', code:'5400', name:'Office Rent',               type:'Expense',   active:true },
+    { id:'COA-5500', code:'5500', name:'Repairs & Maintenance',     type:'Expense',   active:true },
+    { id:'COA-5600', code:'5600', name:'Consumables',               type:'Expense',   active:true },
+    { id:'COA-5700', code:'5700', name:'Miscellaneous Expenses',    type:'Expense',   active:true }
+  ],
   allowFinalisedTxnEdit: false,
   gdrive: { clientId:'870827159813-4g2i299mv9qduqpmju40mpr5f63uvgns.apps.googleusercontent.com', connected:false, folderId:null, fileId:null, backupsFolderId:null, sheetId:null, lastSynced:null, email:'',
     /* Pinned IDs: when set, every device uses these exact Drive resources directly — no
@@ -415,6 +443,10 @@ async function loadAll(){
   if(!ORG.taxOld) ORG.taxOld = JSON.parse(JSON.stringify(DEFAULT_ORG.taxOld));
   if(!ORG.txnSeq) ORG.txnSeq = JSON.parse(JSON.stringify(DEFAULT_ORG.txnSeq));
   if(!ORG.txnPrefixes) ORG.txnPrefixes = JSON.parse(JSON.stringify(DEFAULT_ORG.txnPrefixes));
+  if(!ORG.expPrefix) ORG.expPrefix = 'EXP';
+  if(!ORG.expSeq) ORG.expSeq = {};
+  if(ORG.allowFinalisedExpenseEdit===undefined) ORG.allowFinalisedExpenseEdit = false;
+  if(!ORG.chartOfAccounts) ORG.chartOfAccounts = JSON.parse(JSON.stringify(DEFAULT_ORG.chartOfAccounts));
   if(ORG.allowFinalisedTxnEdit===undefined) ORG.allowFinalisedTxnEdit = false;
   if(ORG.gstin===undefined) ORG.gstin = '';
   EMPLOYEES = await getJSON('employees', []);
@@ -439,6 +471,7 @@ async function loadAll(){
   PARTIES = await getJSON('parties', []);
   COMPANY_DOCS = await getJSON('documents', []);
   TRANSACTIONS = await getJSON('transactions', []);
+  EXPENSES = await getJSON('expenses', []);
   refreshBrand();
 }
 async function saveOrg(){ await setJSON('org-profile', ORG); }
@@ -446,6 +479,11 @@ async function saveTransactions(){
   const remote = await pullRemotePayload();
   TRANSACTIONS = mergeCollection('transactions', TRANSACTIONS, remote && remote.transactions, remote && remote.tombstones && remote.tombstones.transactions);
   await setJSON('transactions', TRANSACTIONS);
+}
+async function saveExpenses(){
+  const remote = await pullRemotePayload();
+  EXPENSES = mergeCollection('expenses', EXPENSES, remote && remote.expenses, remote && remote.tombstones && remote.tombstones.expenses);
+  await setJSON('expenses', EXPENSES);
 }
 async function saveParties(){
   const remote = await pullRemotePayload();
@@ -501,6 +539,7 @@ function setTab(tab){
     compliance:['Compliance','TDS, EPFO, ESIC and PT filings & documents'],
     parties:['Parties','Clients and sub-contractors directory'],
     transactions:['Transactions','Enquiries, quotations, purchase orders, invoices, credit & delivery notes'],
+    expenses:['Bills & Expenses','Vendor bills, GST and TDS tracking'],
     documents:['Documents','Registrations, licences, certificates and insurance'],
     backup:['Backup & Restore','Export and restore your data'],
     settings:['Settings','Company details — admin only']
@@ -530,6 +569,7 @@ function render(){
   if(activeTab==='compliance') return renderCompliance(c, actions);
   if(activeTab==='parties') return renderParties(c, actions);
   if(activeTab==='transactions') return renderTransactions(c, actions);
+  if(activeTab==='expenses') return renderExpenses(c, actions);
   if(activeTab==='documents') return renderDocuments(c, actions);
   if(activeTab==='backup') return renderBackup(c, actions);
   if(activeTab==='settings') return renderSettings(c, actions);
@@ -1661,14 +1701,14 @@ async function driveRestoreBackup(fileId, label){
       const gdriveKeep = ORG.gdrive;
       ORG = data.org; ORG.gdrive = gdriveKeep;
       EMPLOYEES = data.employees||[]; PAYSLIPS = data.payslips||[]; COMPLIANCE = data.compliance||{};
-      PARTIES = data.parties||[]; COMPANY_DOCS = data.documents||[]; TRANSACTIONS = data.transactions||[];
-      await saveOrg(); await saveEmployees(); await savePayslips(); await saveParties(); await saveCompanyDocs(); await saveTransactions();
+      PARTIES = data.parties||[]; COMPANY_DOCS = data.documents||[]; TRANSACTIONS = data.transactions||[]; EXPENSES = data.expenses||[];
+      await saveOrg(); await saveEmployees(); await savePayslips(); await saveParties(); await saveCompanyDocs(); await saveTransactions(); await saveExpenses();
       for(const empId of Object.keys(COMPLIANCE)){ await saveCompliance(empId); }
       refreshBrand(); closeModal(); toast('Restored from Google Drive backup.'); updateDocBadge(); setTab('dashboard');
     }catch(e){ toast('Restore failed.', true); }
   };
 }
-const SHEET_TABS = ['Employees','Salary History','Payslips','Compliance','Parties','Documents','Transactions'];
+const SHEET_TABS = ['Employees','Salary History','Payslips','Compliance','Parties','Documents','Transactions','Expenses'];
 async function driveEnsureSheet(){
   let sheetId = ORG.gdrive.pinnedSheetId || ORG.gdrive.sheetId;
   if(sheetId){
@@ -1759,6 +1799,10 @@ async function driveExportSheet(silent){
     const txnRows = [['Txn No.','Category','Direction','Party','Date','Due Date','Status','Reference','Subject','Subtotal','GST Mode','Tax Amount','Grand Total','Revision No.']]
       .concat(TRANSACTIONS.map(t=>{ const tot = calcTxnTotals(t); return [t.txnNo,TXN_CATEGORIES[t.txnCategory]?TXN_CATEGORIES[t.txnCategory].label:t.txnCategory,t.txnDirection,t.partyName,t.txnDate,t.dueDate,t.status,(t.referenceType||'')+' '+(t.reference||''),t.subject,tot.subtotal,t.gstMode,tot.taxAmount,tot.grandTotal,t.revisionNo||0]; }));
 
+    const expRows = [['Voucher No.','Vendor','Bill No.','Bill Date','Due Date','Category','Currency','Bill Amount (INR)','GST Mode','RCM','GST Amount','TDS Section','TDS Rate','TDS Amount','Net Payable','Paid','Balance','Status','Ledger Account','GSTR-2B Claim Month','Tally Voucher No.','Tally Voucher Date']]
+      .concat(EXPENSES.map(e=>{ const tot = calcExpenseTotals(e); const sec = TDS_SECTION_BY_ID[e.tdsSectionId]; const ledger = (ORG.chartOfAccounts||[]).find(a=>a.id===e.ledgerAccountId);
+        return [e.voucherNo,e.vendorName,e.billNo,e.billDate,e.dueDate,e.category,e.currency||'INR',tot.amtINR,e.rcmApplicable?'RCM':e.gstMode,e.rcmApplicable?(e.rcmRate+'%'):'',tot.gstTotal,sec?sec.oldCode:'',e.tdsApplicable?e.tdsRate:'',tot.tdsAmount,tot.netPayable,e.paidAmount,tot.balance,tot.payStatus,ledger?ledger.code+' '+ledger.name:'',e.gstr2bClaimMonth||'',e.tallyVoucherNo||'',e.tallyVoucherDate||'']; }));
+
     await driveWriteSheetTab(sheetId, 'Employees', empRows);
     await driveWriteSheetTab(sheetId, 'Salary History', salRows);
     await driveWriteSheetTab(sheetId, 'Payslips', slipRows);
@@ -1766,8 +1810,9 @@ async function driveExportSheet(silent){
     await driveWriteSheetTab(sheetId, 'Parties', partyRows);
     await driveWriteSheetTab(sheetId, 'Documents', docRows);
     await driveWriteSheetTab(sheetId, 'Transactions', txnRows);
+    await driveWriteSheetTab(sheetId, 'Expenses', expRows);
 
-    if(!silent){ toast('Google Sheet updated — all tabs including Transactions.'); if(activeTab==='settings') renderSettings(document.getElementById('content'), document.getElementById('tabActions')); }
+    if(!silent){ toast('Google Sheet updated — all tabs including Bills & Expenses.'); if(activeTab==='settings') renderSettings(document.getElementById('content'), document.getElementById('tabActions')); }
   }catch(e){ driveLastError = e.message; if(!silent) toast('Sheet sync failed: '+e.message, true); throw e; }
 }
 
@@ -2531,6 +2576,409 @@ function openTxnPrint(id){
   document.getElementById('printBtn').onclick = ()=> window.print();
 }
 
+/* ============================= BILLS & EXPENSES ============================= */
+/* Scoped to the core vendor-bill workflow — a single bill amount, GST, TDS (using the real
+   Income Tax TDS section catalog below), and payment tracking. Deliberately leaves out the
+   reference app's Tally ERP voucher sync, multi-currency/exchange rate handling, Reverse
+   Charge Mechanism, GSTR-2B claim-month overrides, and Chart-of-Accounts ledger linkage —
+   those are real, substantial systems in their own right and weren't part of what was asked
+   for here. Ask if any of those are needed later. */
+const TDS_SECTIONS = [
+  { id:'EPF',     oldCode:'192A',    newCode:'392',          description:'EPF premature withdrawal',           defaultRate:10 },
+  { id:'COM-IH',  oldCode:'194H',    newCode:'393(1) Sl 1',  description:'Commission / brokerage — Indiv/HUF',  defaultRate:5 },
+  { id:'COM-OT',  oldCode:'194H',    newCode:'393(1) Sl 1',  description:'Commission / brokerage — Others',     defaultRate:5 },
+  { id:'RENT-PM', oldCode:'194I(a)', newCode:'393(1) Sl 2',  description:'Rent — Plant / Machinery',            defaultRate:2 },
+  { id:'RENT-LB', oldCode:'194I(b)', newCode:'393(1) Sl 2',  description:'Rent — Land / Building / Furniture',  defaultRate:10 },
+  { id:'CON-IH',  oldCode:'194C',    newCode:'393(1) Sl 6',  description:'Contractor payments — Indiv/HUF',     defaultRate:1 },
+  { id:'CON-OT',  oldCode:'194C',    newCode:'393(1) Sl 6',  description:'Contractor payments — Others',        defaultRate:2 },
+  { id:'TECH',    oldCode:'194J(b)', newCode:'393(1) Sl 6',  description:'Technical services',                  defaultRate:2 },
+  { id:'PROF',    oldCode:'194J(a)', newCode:'393(1) Sl 6',  description:'Professional fees',                   defaultRate:10 },
+  { id:'PUR',     oldCode:'194Q',    newCode:'393(1) Sl 8',  description:'Purchase of goods (above 50L)',       defaultRate:0.1 },
+  { id:'PERK',    oldCode:'194R',    newCode:'393(1) Sl 9',  description:'Business perquisites',                defaultRate:10 }
+];
+const TDS_SECTION_BY_ID = Object.fromEntries(TDS_SECTIONS.map(s=>[s.id,s]));
+function tdsSectionLabel(s){ return `${s.oldCode} → ${s.newCode} · ${s.description} · ${s.defaultRate}%`; }
+const EXPENSE_CATEGORIES = ['Materials','Services','Rent','Utilities','Transport','Professional Fees','Statutory','Salary','Other'];
+function nextExpNo(){
+  const fy = currentFYShort();
+  const key = 'EXP-'+fy;
+  const seq = ORG.expSeq[key]||1;
+  ORG.expSeq[key] = seq+1;
+  return `${ORG.expPrefix}${fy}${String(seq).padStart(3,'0')}`;
+}
+const CURRENCY_SYMBOLS = { INR:'₹', USD:'$', EUR:'€', GBP:'£', SGD:'S$' };
+const RCM_RATES = [0,5,12,18,28];
+/* Multi-currency: billAmount is in the bill's own currency; exchRate converts it to INR,
+   and every downstream figure (GST, TDS, totals) is computed on that INR base — matching
+   how the source app's calcExpAmounts() works.
+   Reverse Charge (RCM): when applicable, the vendor is NOT collecting GST — you pay them
+   only the taxable amount, and separately self-assess and pay that GST straight to the
+   government (with a matching Input Tax Credit). So unlike a normal bill, the GST here is
+   tracked for compliance but does NOT add to what the vendor is owed. */
+function calcExpenseTotals(e){
+  const rate = Number(e.exchRate)||1;
+  const amt = Number(e.billAmount)||0;
+  const amtINR = amt*rate;
+  let cgst=0, sgst=0, igst=0;
+  if(e.rcmApplicable){
+    const r = Number(e.rcmRate)||0;
+    if(e.rcmSupplyType==='inter') igst = amtINR*r/100;
+    else { cgst = amtINR*r/200; sgst = amtINR*r/200; }
+  } else {
+    const gstAmt = amtINR * (Number(e.gstPct)||0) / 100;
+    if(e.gstMode==='Inter') igst = gstAmt;
+    else if(e.gstMode==='Intra'){ cgst = gstAmt/2; sgst = gstAmt/2; }
+  }
+  const gstTotal = cgst+sgst+igst;
+  const tdsAmount = e.tdsApplicable ? amtINR * (Number(e.tdsRate)||0) / 100 : 0;
+  const grossTotal = e.rcmApplicable ? amtINR : (amtINR + gstTotal);
+  const netPayable = grossTotal - tdsAmount;
+  const balance = Math.max(0, netPayable - (Number(e.paidAmount)||0));
+  let payStatus = 'Pending';
+  if((Number(e.paidAmount)||0) >= netPayable - 0.5) payStatus = 'Paid';
+  else if((Number(e.paidAmount)||0) > 0) payStatus = 'Partial';
+  return { amt, amtINR, cgst, sgst, igst, gstTotal, tdsAmount, grossTotal, netPayable, balance, payStatus };
+}
+function expIsLocked(e){ return calcExpenseTotals(e).payStatus==='Paid' && !ORG.allowFinalisedExpenseEdit; }
+function expStatusPill(status){
+  const cls = {Pending:'bad', Partial:'warn', Paid:'good'}[status]||'neutral';
+  return `<span class="pill ${cls}">${esc(status)}</span>`;
+}
+
+function renderExpenses(c, actions){
+  actions.innerHTML = `<button class="btn" id="newExpBtn">+ New Bill / Expense</button>`;
+  actions.querySelector('#newExpBtn').onclick = ()=> openExpenseForm();
+
+  const withTotals = EXPENSES.map(e=>({ e, tot:calcExpenseTotals(e) }));
+  const totalPayable = withTotals.reduce((s,x)=> s+x.tot.netPayable, 0);
+  const totalOutstanding = withTotals.reduce((s,x)=> s+x.tot.balance, 0);
+  const pendingCount = withTotals.filter(x=> x.tot.payStatus!=='Paid').length;
+  const tallyPendingCount = EXPENSES.filter(e=> !e.tallyVoucherNo).length;
+  const thisMonth = new Date().toISOString().slice(0,7);
+  const thisMonthTotal = withTotals.filter(x=> (x.e.billDate||'').slice(0,7)===thisMonth).reduce((s,x)=> s+x.tot.netPayable, 0);
+
+  c.innerHTML = `
+    <div class="stat-row">
+      <div class="stat" style="background:var(--g-blue);"><div class="n">${money(totalPayable)}</div><div class="l"><span class="ic">🧾</span>Total Billed</div></div>
+      <div class="stat" style="background:var(--g-orange);"><div class="n">${money(thisMonthTotal)}</div><div class="l"><span class="ic">🗓️</span>This Month</div></div>
+      <div class="stat" style="background:var(--g-red);"><div class="n">${pendingCount}</div><div class="l"><span class="ic">⏳</span>Unpaid Bills</div></div>
+      <div class="stat" style="background:var(--g-green);"><div class="n">${money(totalOutstanding)}</div><div class="l"><span class="ic">💸</span>Outstanding Payable</div></div>
+    </div>
+    <div class="hint" style="margin:-6px 0 14px;">📋 ${tallyPendingCount} bill${tallyPendingCount===1?'':'s'} not yet posted to Tally</div>
+    <div class="card">
+      <h2>Bills &amp; Expenses</h2>
+      <div class="grid cols-3" style="margin-top:10px;">
+        <div class="field"><label>Search</label><input type="text" id="expSearch" placeholder="Voucher no., vendor, bill no., description..."></div>
+        <div class="field"><label>Category</label><select id="expCatFilter"><option value="">All Categories</option>${EXPENSE_CATEGORIES.map(c=>`<option>${c}</option>`).join('')}</select></div>
+        <div class="field"><label>Status</label><select id="expStatusFilter"><option value="">All Statuses</option><option>Pending</option><option>Partial</option><option>Paid</option></select></div>
+      </div>
+      <div id="expTableWrap"></div>
+    </div>
+  `;
+  function draw(){
+    const q = (document.getElementById('expSearch').value||'').toLowerCase();
+    const cat = document.getElementById('expCatFilter').value;
+    const st = document.getElementById('expStatusFilter').value;
+    let list = EXPENSES.filter(e=>{
+      const mq = !q || [e.voucherNo,e.vendorName,e.billNo,e.description].some(v=>(v||'').toLowerCase().includes(q));
+      const mc = !cat || e.category===cat;
+      const ms = !st || calcExpenseTotals(e).payStatus===st;
+      return mq && mc && ms;
+    });
+    list = list.slice().sort((a,b)=> (b.billDate||'').localeCompare(a.billDate||''));
+    const wrap = document.getElementById('expTableWrap');
+    if(!list.length){ wrap.innerHTML = '<div class="empty"><div class="icon">🧾</div>No bills recorded yet.<div class="cta"><button class="btn" id="emptyNewExp">+ New Bill / Expense</button></div></div>'; document.getElementById('emptyNewExp').onclick=()=>openExpenseForm(); return; }
+    wrap.innerHTML = `<table><thead><tr><th>Voucher No.</th><th>Vendor</th><th>Date</th><th>Category</th><th class="num-cell">Net Payable</th><th class="num-cell">Balance</th><th>TDS</th><th>Tally</th><th>Status</th><th></th></tr></thead><tbody>
+      ${list.map(e=>{ const tot = calcExpenseTotals(e); return `<tr>
+        <td><b>${esc(e.voucherNo)}</b>${e.billNo?`<div style="color:var(--muted);font-size:11.5px;">${esc(e.billNo)}</div>`:''}${e.currency&&e.currency!=='INR'?` <span class="pill neutral">${esc(e.currency)}</span>`:''}${e.rcmApplicable?' <span class="pill warn">RCM</span>':''}</td>
+        <td>${esc(e.vendorName||'—')}</td><td>${esc(e.billDate||'—')}</td><td>${esc(e.category||'—')}</td>
+        <td class="num-cell">${money(tot.netPayable)}</td><td class="num-cell">${money(tot.balance)}</td>
+        <td>${e.tdsApplicable?`<span class="pill accent">${esc((TDS_SECTION_BY_ID[e.tdsSectionId]||{}).oldCode||'')} ${e.tdsRate}%</span>`:'—'}</td>
+        <td>${e.tallyVoucherNo?`<span class="pill good" title="#${esc(e.tallyVoucherNo)}">✓ Posted</span>`:'<span class="pill bad">Pending</span>'}</td>
+        <td>${expStatusPill(tot.payStatus)}</td>
+        <td class="no-print" style="white-space:nowrap;">
+          <button class="btn secondary sm" data-view="${e.id}">View / Print</button>
+          <button class="btn secondary sm" data-edit="${e.id}">Edit</button>
+          <button class="btn danger sm" data-del="${e.id}">Delete</button>
+        </td></tr>`; }).join('')}
+    </tbody></table>`;
+    wrap.querySelectorAll('[data-view]').forEach(b=> b.onclick=()=>openExpensePrint(b.dataset.view));
+    wrap.querySelectorAll('[data-edit]').forEach(b=> b.onclick=()=>openExpenseForm(b.dataset.edit));
+    wrap.querySelectorAll('[data-del]').forEach(b=> b.onclick=()=>deleteExpense(b.dataset.del));
+  }
+  ['expSearch','expCatFilter','expStatusFilter'].forEach(id=> document.getElementById(id).addEventListener('input', draw));
+  draw();
+}
+
+let pendingExpFiles = [];
+let pendingTallyFile = null;
+function openExpenseForm(expId){
+  const isEdit = !!expId;
+  const e = isEdit ? EXPENSES.find(x=>x.id===expId) : {
+    vendorId:'', billNo:'', billDate:new Date().toISOString().slice(0,10), dueDate:'',
+    description:'', category:'Materials', billAmount:0, currency:'INR', exchRate:1, gstMode:'Intra', gstPct:18,
+    rcmApplicable:false, rcmRate:18, rcmSupplyType:'intra', gstr2bClaimMonth:'',
+    tdsApplicable:false, tdsSectionId:'', tdsRate:0, ledgerAccountId:'',
+    paidAmount:0, paidFrom:'', notes:'', tallyVoucherNo:'', tallyVoucherDate:''
+  };
+  if(isEdit && expIsLocked(e)){ toast('This bill is fully paid and locked. Enable editing in Settings → Bills & Expenses if this needs correcting.', true); return; }
+  const baseRev = Number(e._rev)||0;
+  pendingExpFiles = isEdit ? (e.attachments||[]).slice() : [];
+  pendingTallyFile = isEdit ? (e.tallyAttachment||null) : null;
+  const activeAccounts = (ORG.chartOfAccounts||[]).filter(a=>a.active);
+
+  openModal(`
+    <div class="modal-head"><h3>${isEdit?'Edit':'New'} Bill / Expense</h3><button class="modal-close" id="mClose">✕</button></div>
+    <form id="expForm">
+      <div class="grid cols-3">
+        <div class="field"><label>Vendor</label><select name="vendorId"><option value="">— Select Vendor —</option>${PARTIES.map(p=>`<option value="${p.id}" ${e.vendorId===p.id?'selected':''}>${esc(p.partyName)}</option>`).join('')}</select></div>
+        <div class="field"><label>Bill No.</label><input type="text" name="billNo" value="${esc(e.billNo)}"></div>
+        <div class="field"><label>Category</label><select name="category">${EXPENSE_CATEGORIES.map(c=>`<option ${e.category===c?'selected':''}>${c}</option>`).join('')}</select></div>
+      </div>
+      <div class="grid cols-3">
+        <div class="field"><label>Bill Date</label><input type="date" name="billDate" value="${esc(e.billDate)}" required></div>
+        <div class="field"><label>Due Date</label><input type="date" name="dueDate" value="${esc(e.dueDate)}"></div>
+        <div class="field"><label>Ledger Account <span style="font-weight:400;color:var(--muted);">(optional)</span></label><select name="ledgerAccountId"><option value="">— Unassigned —</option>${activeAccounts.map(a=>`<option value="${a.id}" ${e.ledgerAccountId===a.id?'selected':''}>${esc(a.code)} · ${esc(a.name)}</option>`).join('')}</select></div>
+      </div>
+      <div class="field"><label>Description</label><input type="text" name="description" value="${esc(e.description)}"></div>
+      <div class="section-label">Amount &amp; Currency</div>
+      <div class="grid cols-3">
+        <div class="field"><label>Currency</label><select name="currency" id="expCurrency">${Object.keys(CURRENCY_SYMBOLS).map(c=>`<option ${e.currency===c?'selected':''}>${c}</option>`).join('')}</select></div>
+        <div class="field"><label>Exchange Rate (→ INR)</label><input type="number" min="0" step="0.0001" name="exchRate" id="expExchRate" value="${e.exchRate}"></div>
+        <div class="field"><label>Bill Amount (before tax, in bill currency)</label><input type="number" min="0" step="0.01" name="billAmount" id="expBillAmount" value="${e.billAmount}"></div>
+      </div>
+      <div class="section-label">GST</div>
+      <div class="grid cols-3">
+        <div class="field"><label>GST Mode</label><select name="gstMode" id="expGstMode" ${e.rcmApplicable?'disabled':''}><option value="None" ${e.gstMode==='None'?'selected':''}>None</option><option value="Intra" ${e.gstMode==='Intra'?'selected':''}>Intra-state (CGST + SGST)</option><option value="Inter" ${e.gstMode==='Inter'?'selected':''}>Inter-state (IGST)</option></select></div>
+        <div class="field"><label>GST %</label><input type="number" min="0" step="0.01" name="gstPct" id="expGstPct" value="${e.gstPct}" ${e.rcmApplicable?'disabled':''}></div>
+      </div>
+      <div class="field" style="background:#FFF7ED;border:1px solid #FDBA74;border-radius:8px;padding:10px 12px;">
+        <label class="checkline"><input type="checkbox" name="rcmApplicable" id="expRcmChk" ${e.rcmApplicable?'checked':''}> 🔄 Reverse Charge (RCM) Applicable</label>
+        <p class="hint" id="expRcmHelp" style="display:${e.rcmApplicable?'block':'none'};margin:6px 0 0;">Under RCM, <b>you</b> pay GST directly to the government (with matching Input Tax Credit) instead of the vendor collecting it — so the amount you pay the vendor excludes this GST.</p>
+        <div class="grid cols-3" id="expRcmFields" style="display:${e.rcmApplicable?'grid':'none'};margin-top:8px;">
+          <div class="field" style="margin-bottom:0;"><label>GST Rate</label><select name="rcmRate" id="expRcmRate">${RCM_RATES.map(r=>`<option value="${r}" ${e.rcmRate===r?'selected':''}>${r}%${r===18?' (most common)':''}</option>`).join('')}</select></div>
+          <div class="field" style="margin-bottom:0;"><label>Supply Type</label><select name="rcmSupplyType" id="expRcmSupply"><option value="intra" ${e.rcmSupplyType==='intra'?'selected':''}>Intrastate (CGST+SGST)</option><option value="inter" ${e.rcmSupplyType==='inter'?'selected':''}>Interstate (IGST)</option></select></div>
+        </div>
+      </div>
+      <div class="field"><label>GSTR-2B Claim Month <span style="font-weight:400;color:var(--muted);">(only if supplier files late — leave blank otherwise)</span></label><input type="month" name="gstr2bClaimMonth" value="${esc(e.gstr2bClaimMonth)}"></div>
+      <div class="section-label">TDS</div>
+      <div class="field"><label class="checkline"><input type="checkbox" name="tdsApplicable" id="expTdsChk" ${e.tdsApplicable?'checked':''}> TDS applicable on this bill</label></div>
+      <div class="grid cols-3" id="expTdsFields" style="display:${e.tdsApplicable?'grid':'none'};">
+        <div class="field" style="grid-column:span 2;"><label>TDS Section</label><select name="tdsSectionId" id="expTdsSection">
+          <option value="">— Select Section —</option>${TDS_SECTIONS.map(s=>`<option value="${s.id}" ${e.tdsSectionId===s.id?'selected':''}>${esc(tdsSectionLabel(s))}</option>`).join('')}
+        </select></div>
+        <div class="field"><label>TDS Rate %</label><input type="number" min="0" step="0.01" name="tdsRate" id="expTdsRate" value="${e.tdsRate}"></div>
+      </div>
+      <div id="expTotalsPreview"></div>
+      <div class="section-label" style="margin-top:14px;">Payment</div>
+      <div class="grid cols-3">
+        <div class="field"><label>Amount Paid So Far (₹)</label><input type="number" min="0" step="0.01" name="paidAmount" id="expPaidAmount" value="${e.paidAmount}"></div>
+        <div class="field"><label>Paid From (bank / cash)</label><input type="text" name="paidFrom" value="${esc(e.paidFrom)}"></div>
+      </div>
+      <div class="field"><label>Notes</label><textarea name="notes" rows="2">${esc(e.notes)}</textarea></div>
+      <div class="section-label" style="display:flex;align-items:center;justify-content:space-between;">
+        <span>📋 Tally Voucher</span>${e.tallyVoucherNo?'<span class="pill good">Posted</span>':'<span class="pill warn">Pending</span>'}
+      </div>
+      <p class="hint" style="margin:-4px 0 8px;">Record the Tally entry once your accountant has posted this bill — this is a tracking checklist, not an automatic sync.</p>
+      <div class="grid cols-2">
+        <div class="field"><label>Tally Voucher Number</label><input type="text" name="tallyVoucherNo" value="${esc(e.tallyVoucherNo)}"></div>
+        <div class="field"><label>Tally Voucher Date</label><input type="date" name="tallyVoucherDate" value="${esc(e.tallyVoucherDate)}"></div>
+      </div>
+      <div class="file-drop" id="tallyDropZone">Click to attach a Tally voucher screenshot/export (optional)</div>
+      <input type="file" id="tallyFileInput" style="display:none;">
+      <div id="tallyFileChip"></div>
+      <div class="section-label">Bill Attachments</div>
+      <div class="file-drop" id="expDropZone">Click to choose files, or drag &amp; drop bill scans/receipts</div>
+      <input type="file" id="expFileInput" multiple style="display:none;">
+      <div id="expFileChips"></div>
+      <div class="btn-row"><button type="submit" class="btn">Save Bill</button><button type="button" class="btn secondary" id="mCancel">Cancel</button></div>
+    </form>
+  `, true);
+  document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+
+  function readForm(){
+    return {
+      billAmount: Number(document.getElementById('expBillAmount').value)||0,
+      exchRate: Number(document.getElementById('expExchRate').value)||1,
+      gstMode: document.getElementById('expGstMode').value,
+      gstPct: Number(document.getElementById('expGstPct').value)||0,
+      rcmApplicable: document.getElementById('expRcmChk').checked,
+      rcmRate: Number(document.getElementById('expRcmRate').value)||0,
+      rcmSupplyType: document.getElementById('expRcmSupply').value,
+      tdsApplicable: document.getElementById('expTdsChk').checked,
+      tdsRate: Number(document.getElementById('expTdsRate').value)||0,
+      paidAmount: Number(document.getElementById('expPaidAmount').value)||0
+    };
+  }
+  function drawTotalsPreview(){
+    const tot = calcExpenseTotals(readForm());
+    document.getElementById('expTotalsPreview').innerHTML = `
+      <div class="divider"></div>
+      <div class="grid cols-4">
+        <div><label>Bill Amount (INR)</label><div><b>${money2(tot.amtINR)}</b></div></div>
+        <div><label>GST Amount${document.getElementById('expRcmChk').checked?' (self-assessed, not paid to vendor)':''}</label><div><b>${money2(tot.gstTotal)}</b></div></div>
+        <div><label>TDS Deducted</label><div><b>${money2(tot.tdsAmount)}</b></div></div>
+        <div><label>Net Payable to Vendor</label><div><b>${money2(tot.netPayable)}</b></div></div>
+        <div><label>Balance Due</label><div><b style="${tot.balance>0?'color:var(--bad);':''}">${money2(tot.balance)}</b></div></div>
+      </div>`;
+  }
+  document.getElementById('expTdsChk').addEventListener('change', (ev)=>{
+    document.getElementById('expTdsFields').style.display = ev.target.checked?'grid':'none';
+    drawTotalsPreview();
+  });
+  document.getElementById('expTdsSection').addEventListener('change', (ev)=>{
+    const s = TDS_SECTION_BY_ID[ev.target.value];
+    if(s) document.getElementById('expTdsRate').value = s.defaultRate;
+    drawTotalsPreview();
+  });
+  document.getElementById('expRcmChk').addEventListener('change', (ev)=>{
+    const on = ev.target.checked;
+    document.getElementById('expRcmHelp').style.display = on?'block':'none';
+    document.getElementById('expRcmFields').style.display = on?'grid':'none';
+    document.getElementById('expGstMode').disabled = on;
+    document.getElementById('expGstPct').disabled = on;
+    drawTotalsPreview();
+  });
+  ['expBillAmount','expExchRate','expGstMode','expGstPct','expRcmRate','expRcmSupply','expTdsRate','expPaidAmount'].forEach(id=> document.getElementById(id).addEventListener('input', drawTotalsPreview));
+  drawTotalsPreview();
+
+  const tallyDropZone = document.getElementById('tallyDropZone'); const tallyFileInput = document.getElementById('tallyFileInput');
+  tallyDropZone.onclick = ()=> tallyFileInput.click();
+  tallyDropZone.ondragover = (ev)=> ev.preventDefault();
+  tallyDropZone.ondrop = async (ev)=>{ ev.preventDefault(); await handleTallyFile(ev.dataTransfer.files[0]); };
+  tallyFileInput.onchange = async ()=> handleTallyFile(tallyFileInput.files[0]);
+  async function handleTallyFile(f){
+    if(!f) return;
+    try{ pendingTallyFile = await readFileAsDataURL(f); drawTallyChip(); }catch(err){ toast('Could not read file: '+f.name, true); }
+  }
+  function drawTallyChip(){
+    document.getElementById('tallyFileChip').innerHTML = pendingTallyFile ? `<div class="file-chip"><span class="fname">${esc(pendingTallyFile.name)} (${Math.round(pendingTallyFile.size/1024)} KB)</span><button type="button" id="rmTallyFile">✕</button></div>` : '';
+    const rm = document.getElementById('rmTallyFile'); if(rm) rm.onclick = ()=>{ pendingTallyFile=null; drawTallyChip(); };
+  }
+  drawTallyChip();
+
+  const dropZone = document.getElementById('expDropZone'); const fileInput = document.getElementById('expFileInput');
+  dropZone.onclick = ()=> fileInput.click();
+  dropZone.ondragover = (ev)=> ev.preventDefault();
+  dropZone.ondrop = async (ev)=>{ ev.preventDefault(); await handleExpFiles(ev.dataTransfer.files); };
+  fileInput.onchange = async ()=> handleExpFiles(fileInput.files);
+  async function handleExpFiles(fileList){
+    for(const f of fileList){ try{ pendingExpFiles.push(await readFileAsDataURL(f)); }catch(err){ toast('Could not read file: '+f.name, true); } }
+    drawExpChips();
+  }
+  function drawExpChips(){
+    document.getElementById('expFileChips').innerHTML = pendingExpFiles.map((f,i)=>`<div class="file-chip"><span class="fname">${esc(f.name)} (${Math.round(f.size/1024)} KB)</span><button type="button" data-rmexp="${i}">✕</button></div>`).join('');
+    document.querySelectorAll('[data-rmexp]').forEach(b=>b.onclick=()=>{ pendingExpFiles.splice(Number(b.dataset.rmexp),1); drawExpChips(); });
+  }
+  drawExpChips();
+
+  document.getElementById('expForm').onsubmit = async (ev)=>{
+    ev.preventDefault();
+    if(isEdit){
+      const conflict = await checkRecordConflict('expenses', expId, baseRev);
+      if(conflict){
+        conflictWarning(conflict._updatedBy, conflict._updatedAt,
+          ()=>{ const idx = EXPENSES.findIndex(x=>x.id===expId); if(idx>-1) EXPENSES[idx]=conflict; openExpenseForm(expId); },
+          ()=> submitExpenseForm(ev, isEdit, e));
+        return;
+      }
+    }
+    await submitExpenseForm(ev, isEdit, e);
+  };
+}
+async function submitExpenseForm(ev, isEdit, e){
+  const fd = new FormData(ev.target);
+  const vendor = PARTIES.find(p=>p.id===fd.get('vendorId'));
+  const rec = {
+    id: e.id||uid(), vendorId: fd.get('vendorId'), vendorName: vendor?vendor.partyName:'',
+    billNo: fd.get('billNo').trim(), billDate: fd.get('billDate'), dueDate: fd.get('dueDate'),
+    description: fd.get('description').trim(), category: fd.get('category'),
+    billAmount: Number(fd.get('billAmount'))||0, currency: fd.get('currency')||'INR', exchRate: Number(fd.get('exchRate'))||1,
+    gstMode: fd.get('gstMode'), gstPct: Number(fd.get('gstPct'))||0,
+    rcmApplicable: fd.get('rcmApplicable')==='on', rcmRate: Number(fd.get('rcmRate'))||0, rcmSupplyType: fd.get('rcmSupplyType')||'intra',
+    gstr2bClaimMonth: fd.get('gstr2bClaimMonth')||'',
+    tdsApplicable: fd.get('tdsApplicable')==='on', tdsSectionId: fd.get('tdsSectionId')||'', tdsRate: Number(fd.get('tdsRate'))||0,
+    ledgerAccountId: fd.get('ledgerAccountId')||'',
+    paidAmount: Number(fd.get('paidAmount'))||0, paidFrom: fd.get('paidFrom').trim(), notes: fd.get('notes').trim(),
+    tallyVoucherNo: fd.get('tallyVoucherNo').trim(), tallyVoucherDate: fd.get('tallyVoucherDate')||'', tallyAttachment: pendingTallyFile,
+    attachments: pendingExpFiles
+  };
+  if(isEdit){ rec._rev = e._rev; rec.voucherNo = e.voucherNo; }
+  else { rec.voucherNo = nextExpNo(); await saveOrg(); }
+  tagRecord(rec, !isEdit);
+  if(isEdit){ const idx = EXPENSES.findIndex(x=>x.id===e.id); EXPENSES[idx]=rec; } else { EXPENSES.push(rec); }
+  await saveExpenses();
+  closeModal(); toast(isEdit?'Bill updated.':`${rec.voucherNo} recorded.`); render();
+}
+function deleteExpense(id){
+  const e = EXPENSES.find(x=>x.id===id); if(!e) return;
+  if(expIsLocked(e)){ toast('This bill is fully paid and locked. Enable editing in Settings → Bills & Expenses if this needs correcting.', true); return; }
+  openModal(`
+    <div class="modal-head"><h3>Delete Bill</h3><button class="modal-close" id="mClose">✕</button></div>
+    <p>Delete <b>${esc(e.voucherNo)}</b> (${esc(e.vendorName)})? This cannot be undone.</p>
+    <div class="btn-row"><button class="btn danger" id="confirmDelExp">Delete</button><button class="btn secondary" id="mCancel">Cancel</button></div>
+  `);
+  document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+  document.getElementById('confirmDelExp').onclick = async ()=>{
+    EXPENSES = EXPENSES.filter(x=>x.id!==id); recordTombstone('expenses', id);
+    await saveExpenses(); closeModal(); toast('Bill deleted.'); render();
+  };
+}
+function openExpensePrint(id){
+  const e = EXPENSES.find(x=>x.id===id); if(!e) return;
+  const vendor = PARTIES.find(p=>p.id===e.vendorId);
+  const tot = calcExpenseTotals(e);
+  const tdsSection = TDS_SECTION_BY_ID[e.tdsSectionId];
+  const ledger = (ORG.chartOfAccounts||[]).find(a=>a.id===e.ledgerAccountId);
+  const sym = CURRENCY_SYMBOLS[e.currency]||'₹';
+  const logoHtml = ORG.logo ? `<img src="${ORG.logo}">` : (ORG.companyName||'C').charAt(0).toUpperCase();
+  const html = `
+    <div class="modal-head no-print"><h3>${esc(e.voucherNo)}</h3><button class="modal-close" id="mClose">✕</button></div>
+    <div id="printArea">
+      <div class="payslip">
+        <div class="payslip-top">
+          <div class="logo">${logoHtml}</div>
+          <div class="conameblock"><div class="coname">${esc((ORG.companyName||'YOUR COMPANY').toUpperCase())}</div></div>
+          <div style="width:66px;"></div>
+        </div>
+        <div class="payslip-addr">${esc(ORG.address||'')}${ORG.tel?(' &nbsp;Tel: '+esc(ORG.tel)):''}${ORG.gstin?(' , GSTIN: '+esc(ORG.gstin)):''}</div>
+        <div class="payslip-title">EXPENSE VOUCHER — ${esc(e.voucherNo)}</div>
+        <table class="pstable">
+          <tr><td class="lbl">VENDOR</td><td class="val">${esc(e.vendorName||'—')}</td><td class="lbl">BILL NO.</td><td class="val">${esc(e.billNo||'—')}</td></tr>
+          <tr><td class="lbl">BILL DATE</td><td class="val">${esc(e.billDate||'—')}</td><td class="lbl">DUE DATE</td><td class="val">${esc(e.dueDate||'—')}</td></tr>
+          <tr><td class="lbl">CATEGORY</td><td class="val">${esc(e.category||'—')}</td><td class="lbl">STATUS</td><td class="val">${esc(tot.payStatus)}</td></tr>
+          <tr><td class="lbl">LEDGER ACCOUNT</td><td class="val">${ledger?esc(ledger.code+' · '+ledger.name):'—'}</td><td class="lbl">GSTR-2B CLAIM MONTH</td><td class="val">${esc(e.gstr2bClaimMonth||'Same as bill month')}</td></tr>
+          ${e.currency&&e.currency!=='INR'?`<tr><td class="lbl">BILL CURRENCY</td><td class="val">${esc(e.currency)} ${sym}${money2(e.billAmount)}</td><td class="lbl">EXCHANGE RATE</td><td class="val">1 ${esc(e.currency)} = ₹${e.exchRate}</td></tr>`:''}
+          ${vendor?`<tr><td class="lbl">VENDOR GST / PAN</td><td class="val">${esc(vendor.gstNumber||'—')} / ${esc(vendor.panNumber||'—')}</td><td class="lbl">VENDOR ADDRESS</td><td class="val">${esc(vendor.address||'—')}</td></tr>`:''}
+          ${e.description?`<tr><td class="lbl">DESCRIPTION</td><td class="val" colspan="3">${esc(e.description)}</td></tr>`:''}
+        </table>
+        ${e.rcmApplicable?`<div class="regime-note">🔄 <b>Reverse Charge (RCM) Applicable</b> — the ${money2(tot.gstTotal)} GST below is self-assessed and paid by us directly to the government (with matching ITC), not to the vendor. The Net Payable to the vendor excludes it.</div>`:''}
+        <table class="pstable" style="margin-top:-1px;">
+          <tr class="earnhead"><td colspan="3">CHARGES</td><td colspan="1">DEDUCTIONS</td></tr>
+          <tr><td class="lbl" colspan="2">BILL AMOUNT (INR)</td><td class="val amtcell">${money2(tot.amtINR)}</td><td class="val amtcell">${e.tdsApplicable?money2(tot.tdsAmount)+' TDS':'—'}</td></tr>
+          ${(e.rcmApplicable?e.rcmSupplyType==='intra':e.gstMode==='Intra')?`<tr><td class="lbl" colspan="2">CGST + SGST${e.rcmApplicable?' (RCM, self-assessed)':''}</td><td class="val amtcell">${money2(tot.gstTotal)}</td><td></td></tr>`:''}
+          ${(e.rcmApplicable?e.rcmSupplyType==='inter':e.gstMode==='Inter')?`<tr><td class="lbl" colspan="2">IGST${e.rcmApplicable?' (RCM, self-assessed)':''}</td><td class="val amtcell">${money2(tot.gstTotal)}</td><td></td></tr>`:''}
+          ${e.tdsApplicable&&tdsSection?`<tr><td class="lbl" colspan="2">TDS SECTION</td><td class="val amtcell" colspan="2">${esc(tdsSection.oldCode)} → ${esc(tdsSection.newCode)} (${e.tdsRate}%)</td></tr>`:''}
+          <tr class="totrow"><td colspan="3">NET PAYABLE TO VENDOR</td><td class="amtcell">${money2(tot.netPayable)}</td></tr>
+          <tr><td class="lbl" colspan="2">PAID SO FAR${e.paidFrom?(' ('+esc(e.paidFrom)+')'):''}</td><td class="val amtcell" colspan="2">${money2(e.paidAmount)}</td></tr>
+          <tr class="netrow"><td colspan="3">BALANCE DUE</td><td class="amtcell">${money2(tot.balance)}</td></tr>
+          <tr class="wordsrow"><td colspan="4"><span class="wlabel">Net payable in words:</span> ${esc(rupeesInWords(tot.netPayable))}</td></tr>
+        </table>
+        ${e.tallyVoucherNo?`<div class="regime-note">📋 Posted to Tally — Voucher #${esc(e.tallyVoucherNo)}${e.tallyVoucherDate?' dated '+esc(e.tallyVoucherDate):''}</div>`:''}
+        ${e.notes?`<div class="regime-note"><b>Notes:</b> ${esc(e.notes)}</div>`:''}
+        <div class="payslip-foot"><span>${esc(e.voucherNo)}</span><span>ELECTRONIC DOCUMENT</span></div>
+      </div>
+    </div>
+    <div class="btn-row no-print" style="margin-top:16px;">
+      <button class="btn" id="printBtn">🖨️ Print / Save as PDF</button>
+      <button class="btn secondary" id="mCancel">Close</button>
+    </div>
+  `;
+  openModal(html, true);
+  document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+  document.getElementById('printBtn').onclick = ()=> window.print();
+}
+
 /* ============================= BACKUP & RESTORE ============================= */
 function renderBackup(c, actions){
   c.innerHTML = `
@@ -2552,7 +3000,7 @@ function renderBackup(c, actions){
 }
 async function doExport(){
   for(const e of EMPLOYEES){ await loadCompliance(e.id); }
-  const payload = { exportedAt: new Date().toISOString(), app: 'Valles EASY EMS', version: 2, org: ORG, employees: EMPLOYEES, payslips: PAYSLIPS, compliance: COMPLIANCE, parties: PARTIES, documents: COMPANY_DOCS, transactions: TRANSACTIONS };
+  const payload = { exportedAt: new Date().toISOString(), app: 'Valles EASY EMS', version: 2, org: ORG, employees: EMPLOYEES, payslips: PAYSLIPS, compliance: COMPLIANCE, parties: PARTIES, documents: COMPANY_DOCS, transactions: TRANSACTIONS, expenses: EXPENSES };
   const blob = new Blob([JSON.stringify(payload,null,2)], {type:'application/json'});
   const url = URL.createObjectURL(blob); const a = document.createElement('a');
   a.href = url; a.download = `valles-easy-ems-backup-${new Date().toISOString().slice(0,10)}.json`;
@@ -2572,8 +3020,8 @@ function doRestore(file){
     document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
     document.getElementById('confirmRestore').onclick = async ()=>{
       ORG = data.org; EMPLOYEES = data.employees||[]; PAYSLIPS = data.payslips||[]; COMPLIANCE = data.compliance||{};
-      PARTIES = data.parties||[]; COMPANY_DOCS = data.documents||[]; TRANSACTIONS = data.transactions||[];
-      await saveOrg(); await saveEmployees(); await savePayslips(); await saveParties(); await saveCompanyDocs(); await saveTransactions();
+      PARTIES = data.parties||[]; COMPANY_DOCS = data.documents||[]; TRANSACTIONS = data.transactions||[]; EXPENSES = data.expenses||[];
+      await saveOrg(); await saveEmployees(); await savePayslips(); await saveParties(); await saveCompanyDocs(); await saveTransactions(); await saveExpenses();
       for(const empId of Object.keys(COMPLIANCE)){ await saveCompliance(empId); }
       refreshBrand(); closeModal(); toast('Backup restored.'); updateDocBadge(); setTab('dashboard');
     };
@@ -2657,6 +3105,22 @@ function renderSettings(c, actions){
       </div>
       <div class="btn-row"><button class="btn secondary sm" id="saveTxnSettings">Save</button></div>
       <p class="hint" style="margin-top:10px;">Next transaction numbers: ${Object.entries(TXN_CATEGORIES).map(([k,v])=>{ const fy=currentFYShort(); const prefix=ORG.txnPrefixes[k]||v.prefix; const seq=ORG.txnSeq[k+'-'+fy]||1; return `${v.label} ${prefix}${fy}${String(seq).padStart(3,'0')}`; }).join(' · ')}</p>
+    </div>
+
+    <div class="card">
+      <h2>Bills &amp; Expenses</h2>
+      <p style="color:var(--muted);font-size:13px;">Fully paid bills are locked for audit safety — no edit or delete — unless this is switched on.</p>
+      <div class="field"><label class="checkline"><input type="checkbox" id="allowExpEditChk" ${ORG.allowFinalisedExpenseEdit?'checked':''}> Allow editing/deleting fully paid bills</label></div>
+      <div class="field" style="max-width:200px;"><label>Voucher Prefix</label><input type="text" maxlength="4" id="expPrefixField" value="${esc(ORG.expPrefix)}" style="text-transform:uppercase;"></div>
+      <div class="btn-row"><button class="btn secondary sm" id="saveExpSettings">Save</button></div>
+      <p class="hint" style="margin-top:10px;">Next voucher number: ${esc(ORG.expPrefix)}${currentFYShort()}${String(ORG.expSeq['EXP-'+currentFYShort()]||1).padStart(3,'0')}</p>
+    </div>
+
+    <div class="card">
+      <h2>Chart of Accounts</h2>
+      <p style="color:var(--muted);font-size:13px;">A shared reference list for tagging bills to a ledger account — optional, and safe to leave any bill unassigned. Uncheck "Active" to hide a code from the picker without deleting its history.</p>
+      <div id="coaWrap"></div>
+      <div class="btn-row" style="margin-top:10px;"><button class="btn secondary sm" id="addCoaBtn">+ Add Account</button><button class="btn sm" id="saveCoaBtn">Save Chart of Accounts</button></div>
     </div>
 
     <div class="card">
@@ -2796,6 +3260,38 @@ function renderSettings(c, actions){
       if(v) ORG.txnPrefixes[inp.dataset.prefix] = v;
     });
     await saveOrg(); toast('Transaction settings saved.'); renderSettings(c,actions);
+  };
+  const saveExpBtn = document.getElementById('saveExpSettings');
+  if(saveExpBtn) saveExpBtn.onclick = async ()=>{
+    ORG.allowFinalisedExpenseEdit = document.getElementById('allowExpEditChk').checked;
+    const v = document.getElementById('expPrefixField').value.trim().toUpperCase();
+    if(v) ORG.expPrefix = v;
+    await saveOrg(); toast('Bills & Expenses settings saved.'); renderSettings(c,actions);
+  };
+
+  function drawCoa(){
+    const wrap = document.getElementById('coaWrap'); if(!wrap) return;
+    wrap.innerHTML = ORG.chartOfAccounts.map((a,i)=>`
+      <div class="grid cols-5" style="align-items:end;margin-bottom:6px;">
+        <div class="field" style="margin-bottom:0;"><label>Code</label><input type="text" data-coa="${i}-code" value="${esc(a.code)}"></div>
+        <div class="field" style="grid-column:span 2;margin-bottom:0;"><label>Name</label><input type="text" data-coa="${i}-name" value="${esc(a.name)}"></div>
+        <div class="field" style="margin-bottom:0;"><label>Type</label><select data-coa="${i}-type">${['Asset','Liability','Equity','Income','Expense'].map(t=>`<option ${a.type===t?'selected':''}>${t}</option>`).join('')}</select></div>
+        <div class="field" style="margin-bottom:0;display:flex;gap:6px;align-items:center;"><label class="checkline" style="margin:0;"><input type="checkbox" data-coa="${i}-active" ${a.active?'checked':''}> Active</label><button type="button" class="btn danger sm" data-rmcoa="${i}">✕</button></div>
+      </div>`).join('');
+    wrap.querySelectorAll('[data-rmcoa]').forEach(b=> b.onclick=()=>{ ORG.chartOfAccounts.splice(Number(b.dataset.rmcoa),1); drawCoa(); });
+  }
+  drawCoa();
+  const addCoaBtn = document.getElementById('addCoaBtn');
+  if(addCoaBtn) addCoaBtn.onclick = ()=>{ ORG.chartOfAccounts.push({id:'COA-'+uid(), code:'', name:'', type:'Expense', active:true}); drawCoa(); };
+  const saveCoaBtn = document.getElementById('saveCoaBtn');
+  if(saveCoaBtn) saveCoaBtn.onclick = async ()=>{
+    document.querySelectorAll('[data-coa]').forEach(inp=>{
+      const [i,field] = inp.dataset.coa.split('-');
+      const idx = Number(i);
+      if(field==='active') ORG.chartOfAccounts[idx].active = inp.checked;
+      else ORG.chartOfAccounts[idx][field] = inp.value.trim();
+    });
+    await saveOrg(); toast('Chart of Accounts saved.');
   };
 
   function drawSlabs(){
