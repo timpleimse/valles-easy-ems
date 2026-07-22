@@ -2790,16 +2790,19 @@ function renderExpenses(c, actions){
         <td>${esc(e.vendorName||'—')}</td><td>${esc(e.billDate||'—')}</td><td>${esc(e.category||'—')}</td>
         <td class="num-cell">${money(tot.netPayable)}</td><td class="num-cell">${money(tot.balance)}</td>
         <td>${e.tdsApplicable?`<span class="pill accent">${esc((TDS_SECTION_BY_ID[e.tdsSectionId]||{}).oldCode||'')} ${e.tdsRate}%</span>`:'—'}</td>
-        <td><span class="pill ${hasBill?'good':'bad'}" title="Bill copy">📄 ${hasBill?'✓':'✕'}</span> <span class="pill ${hasReceipt?'good':(needsReceipt?'bad':'neutral')}" title="Payment receipt">🧾 ${hasReceipt?'✓':'✕'}</span></td>
+        <td>
+          <span class="pill ${hasBill?'good':'bad'}" title="Bill copy — click to view" data-viewbill="${e.id}" style="cursor:pointer;">📄 ${hasBill?'✓':'✕'}</span>
+          <span class="pill ${hasReceipt?'good':(needsReceipt?'bad':'neutral')}" title="Payment receipt — click to view" data-viewreceipt="${e.id}" style="cursor:pointer;">🧾 ${hasReceipt?'✓':'✕'}</span>
+        </td>
         <td>${e.tallyVoucherNo?`<span class="pill good" title="#${esc(e.tallyVoucherNo)}">✓ Posted</span>`:'<span class="pill bad">Pending</span>'}</td>
         <td>${expStatusPill(tot.payStatus)}</td>
         <td class="no-print" style="white-space:nowrap;">
-          <button class="btn secondary sm" data-view="${e.id}">View / Print</button>
           <button class="btn secondary sm" data-edit="${e.id}">Edit</button>
           <button class="btn danger sm" data-del="${e.id}">Delete</button>
         </td></tr>`; }).join('')}
     </tbody></table>`;
-    wrap.querySelectorAll('[data-view]').forEach(b=> b.onclick=()=>openExpensePrint(b.dataset.view));
+    wrap.querySelectorAll('[data-viewbill]').forEach(b=> b.onclick=()=> viewAttachmentGroup(b.dataset.viewbill, 'bill'));
+    wrap.querySelectorAll('[data-viewreceipt]').forEach(b=> b.onclick=()=> viewAttachmentGroup(b.dataset.viewreceipt, 'receipt'));
     wrap.querySelectorAll('[data-edit]').forEach(b=> b.onclick=()=>openExpenseForm(b.dataset.edit));
     wrap.querySelectorAll('[data-del]').forEach(b=> b.onclick=()=>deleteExpense(b.dataset.del));
   }
@@ -3065,75 +3068,22 @@ function deleteExpense(id){
     await saveExpenses(); closeModal(); toast('Bill deleted.'); render();
   };
 }
-function openExpensePrint(id){
-  const e = EXPENSES.find(x=>x.id===id); if(!e) return;
-  const vendor = PARTIES.find(p=>p.id===e.vendorId);
-  const tot = calcExpenseTotals(e);
-  const tdsSection = TDS_SECTION_BY_ID[e.tdsSectionId];
-  const ledger = (ORG.chartOfAccounts||[]).find(a=>a.id===e.ledgerAccountId);
-  const billFiles = e.billAttachments || e.attachments || [];
-  const receiptFiles = e.receiptAttachments || [];
-  const sym = CURRENCY_SYMBOLS[e.currency]||'₹';
-  const logoHtml = ORG.logo ? `<img src="${ORG.logo}">` : (ORG.companyName||'C').charAt(0).toUpperCase();
-  const html = `
-    <div class="modal-head no-print"><h3>${esc(e.voucherNo)}</h3><button class="modal-close" id="mClose">✕</button></div>
-    <div id="printArea">
-      <div class="payslip">
-        <div class="payslip-top">
-          <div class="logo">${logoHtml}</div>
-          <div class="conameblock"><div class="coname">${esc((ORG.companyName||'YOUR COMPANY').toUpperCase())}</div></div>
-          <div style="width:66px;"></div>
-        </div>
-        <div class="payslip-addr">${esc(ORG.address||'')}${ORG.tel?(' &nbsp;Tel: '+esc(ORG.tel)):''}${ORG.gstin?(' , GSTIN: '+esc(ORG.gstin)):''}</div>
-        <div class="payslip-title">EXPENSE VOUCHER — ${esc(e.voucherNo)}</div>
-        <table class="pstable">
-          <tr><td class="lbl">VENDOR</td><td class="val">${esc(e.vendorName||'—')}</td><td class="lbl">BILL NO.</td><td class="val">${esc(e.billNo||'—')}</td></tr>
-          <tr><td class="lbl">BILL DATE</td><td class="val">${esc(e.billDate||'—')}</td><td class="lbl">DUE DATE</td><td class="val">${esc(e.dueDate||'—')}</td></tr>
-          <tr><td class="lbl">CATEGORY</td><td class="val">${esc(e.category||'—')}</td><td class="lbl">STATUS</td><td class="val">${esc(tot.payStatus)}</td></tr>
-          <tr><td class="lbl">LEDGER ACCOUNT</td><td class="val">${ledger?esc(ledger.code+' · '+ledger.name):'—'}</td><td class="lbl">GSTR-2B CLAIM MONTH</td><td class="val">${esc(e.gstr2bClaimMonth||'Same as bill month')}</td></tr>
-          ${e.currency&&e.currency!=='INR'?`<tr><td class="lbl">BILL CURRENCY</td><td class="val">${esc(e.currency)} ${sym}${money2(e.billAmount)}</td><td class="lbl">EXCHANGE RATE</td><td class="val">1 ${esc(e.currency)} = ₹${e.exchRate}</td></tr>`:''}
-          ${vendor?`<tr><td class="lbl">VENDOR GST / PAN</td><td class="val">${esc(vendor.gstNumber||'—')} / ${esc(vendor.panNumber||'—')}</td><td class="lbl">VENDOR ADDRESS</td><td class="val">${esc(vendor.address||'—')}</td></tr>`:''}
-          ${e.description?`<tr><td class="lbl">DESCRIPTION</td><td class="val" colspan="3">${esc(e.description)}</td></tr>`:''}
-        </table>
-        ${e.rcmApplicable?`<div class="regime-note">🔄 <b>Reverse Charge (RCM) Applicable</b> — the ${money2(tot.gstTotal)} GST below is self-assessed and paid by us directly to the government (with matching ITC), not to the vendor. The Net Payable to the vendor excludes it.</div>`:''}
-        <table class="pstable" style="margin-top:-1px;">
-          <tr class="earnhead"><td colspan="3">CHARGES</td><td colspan="1">DEDUCTIONS</td></tr>
-          <tr><td class="lbl" colspan="2">BILL AMOUNT (INR)</td><td class="val amtcell">${money2(tot.amtINR)}</td><td class="val amtcell">${e.tdsApplicable?money2(tot.tdsAmount)+' TDS':'—'}</td></tr>
-          ${(e.rcmApplicable?e.rcmSupplyType==='intra':e.gstMode==='Intra')?`<tr><td class="lbl" colspan="2">CGST + SGST${e.rcmApplicable?' (RCM, self-assessed)':''}</td><td class="val amtcell">${money2(tot.gstTotal)}</td><td></td></tr>`:''}
-          ${(e.rcmApplicable?e.rcmSupplyType==='inter':e.gstMode==='Inter')?`<tr><td class="lbl" colspan="2">IGST${e.rcmApplicable?' (RCM, self-assessed)':''}</td><td class="val amtcell">${money2(tot.gstTotal)}</td><td></td></tr>`:''}
-          ${e.tdsApplicable&&tdsSection?`<tr><td class="lbl" colspan="2">TDS SECTION</td><td class="val amtcell" colspan="2">${esc(tdsSection.oldCode)} → ${esc(tdsSection.newCode)} (${e.tdsRate}%)</td></tr>`:''}
-          <tr class="totrow"><td colspan="3">NET PAYABLE TO VENDOR</td><td class="amtcell">${money2(tot.netPayable)}</td></tr>
-          <tr><td class="lbl" colspan="2">PAID SO FAR${e.paidFrom?(' ('+esc(e.paidFrom)+')'):''}</td><td class="val amtcell" colspan="2">${money2(e.paidAmount)}</td></tr>
-          <tr class="netrow"><td colspan="3">BALANCE DUE</td><td class="amtcell">${money2(tot.balance)}</td></tr>
-          <tr class="wordsrow"><td colspan="4"><span class="wlabel">Net payable in words:</span> ${esc(rupeesInWords(tot.netPayable))}</td></tr>
-        </table>
-        ${e.tallyVoucherNo?`<div class="regime-note">📋 Posted to Tally — Voucher #${esc(e.tallyVoucherNo)}${e.tallyVoucherDate?' dated '+esc(e.tallyVoucherDate):''}</div>`:''}
-        ${e.notes?`<div class="regime-note"><b>Notes:</b> ${esc(e.notes)}</div>`:''}
-        <div class="payslip-foot"><span>${esc(e.voucherNo)}</span><span>ELECTRONIC DOCUMENT</span></div>
-      </div>
-    </div>
-    <div class="no-print" style="margin-top:18px;">
-      <div class="section-label">Supporting Documents — Confirm What's On File</div>
-      <div class="grid cols-2">
-        <div>
-          <label style="font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-soft);">📄 Bill / Invoice Copy</label>
-          ${billFiles.length ? billFiles.map(f=>attachmentChipHtml(f)).join('') : '<div class="empty" style="padding:12px;color:var(--bad);">⚠ No bill copy attached</div>'}
-        </div>
-        <div>
-          <label style="font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-soft);">🧾 Payment Receipt</label>
-          ${receiptFiles.length ? receiptFiles.map(f=>attachmentChipHtml(f)).join('') : (tot.payStatus==='Paid'||tot.payStatus==='Partial' ? '<div class="empty" style="padding:12px;color:var(--bad);">⚠ No payment receipt attached, despite a payment recorded</div>' : '<div class="empty" style="padding:12px;color:var(--muted);">Not applicable — nothing paid yet</div>')}
-        </div>
-      </div>
-    </div>
-    <div class="btn-row no-print" style="margin-top:16px;">
-      <button class="btn" id="printBtn">🖨️ Print / Save as PDF</button>
-      <button class="btn secondary" id="mCancel">Close</button>
-    </div>
-  `;
-  openModal(html, true);
+/* Clicking a Docs pill in the bill list opens the attachment(s) directly — one file opens
+   straight in a new tab; several files open a small chooser so it's still one click away. */
+function viewAttachmentGroup(expId, group){
+  const e = EXPENSES.find(x=>x.id===expId); if(!e) return;
+  const files = group==='bill' ? (e.billAttachments||e.attachments||[]) : (e.receiptAttachments||[]);
+  const label = group==='bill' ? 'Bill / Invoice Copy' : 'Payment Receipt';
+  if(!files.length){ toast(`No ${label.toLowerCase()} attached — add one via Edit.`, true); return; }
+  if(files.length===1){ window.open(files[0].data, '_blank'); return; }
+  openModal(`
+    <div class="modal-head"><h3>${esc(label)} — ${esc(e.voucherNo)}</h3><button class="modal-close" id="mClose">✕</button></div>
+    ${files.map(f=>attachmentChipHtml(f)).join('')}
+    <div class="btn-row"><button class="btn secondary" id="mCancel">Close</button></div>
+  `, true);
   document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
-  document.getElementById('printBtn').onclick = ()=> window.print();
 }
+
 
 /* ============================= BACKUP & RESTORE ============================= */
 function renderBackup(c, actions){
