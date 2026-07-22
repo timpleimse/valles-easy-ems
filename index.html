@@ -1891,9 +1891,9 @@ async function driveExportSheet(silent){
     const txnRows = [['Txn No.','Category','Direction','Party','Date','Due Date','Status','Reference','Subject','Subtotal','GST Mode','Tax Amount','Grand Total','Revision No.']]
       .concat(TRANSACTIONS.map(t=>{ const tot = calcTxnTotals(t); return [t.txnNo,TXN_CATEGORIES[t.txnCategory]?TXN_CATEGORIES[t.txnCategory].label:t.txnCategory,t.txnDirection,t.partyName,t.txnDate,t.dueDate,t.status,(t.referenceType||'')+' '+(t.reference||''),t.subject,tot.subtotal,t.gstMode,tot.taxAmount,tot.grandTotal,t.revisionNo||0]; }));
 
-    const expRows = [['Voucher No.','Vendor','Bill No.','Bill Date','Due Date','Category','Currency','Bill Amount (INR)','GST Mode','RCM','GST Amount','TDS Section','TDS Rate','TDS Amount','Net Payable','Paid','Balance','Status','Ledger Account','GSTR-2B Claim Month','Tally Voucher No.','Tally Voucher Date']]
+    const expRows = [['Voucher No.','Vendor','Bill No.','Bill Date','Due Date','Category','Currency','Bill Amount (INR)','GST Mode','RCM','GST Amount','TDS Section','TDS Rate','TDS Amount','Net Payable','Paid','Balance','Status','Ledger Account','GSTR-2B Claim Month','Bill Attached','Receipt Attached','Tally Voucher No.','Tally Voucher Date']]
       .concat(EXPENSES.map(e=>{ const tot = calcExpenseTotals(e); const sec = TDS_SECTION_BY_ID[e.tdsSectionId]; const ledger = (ORG.chartOfAccounts||[]).find(a=>a.id===e.ledgerAccountId);
-        return [e.voucherNo,e.vendorName,e.billNo,e.billDate,e.dueDate,e.category,e.currency||'INR',tot.amtINR,e.rcmApplicable?'RCM':e.gstMode,e.rcmApplicable?(e.rcmRate+'%'):'',tot.gstTotal,sec?sec.oldCode:'',e.tdsApplicable?e.tdsRate:'',tot.tdsAmount,tot.netPayable,e.paidAmount,tot.balance,tot.payStatus,ledger?ledger.code+' '+ledger.name:'',e.gstr2bClaimMonth||'',e.tallyVoucherNo||'',e.tallyVoucherDate||'']; }));
+        return [e.voucherNo,e.vendorName,e.billNo,e.billDate,e.dueDate,e.category,e.currency||'INR',tot.amtINR,e.rcmApplicable?'RCM':e.gstMode,e.rcmApplicable?(e.rcmRate+'%'):'',tot.gstTotal,sec?sec.oldCode:'',e.tdsApplicable?e.tdsRate:'',tot.tdsAmount,tot.netPayable,e.paidAmount,tot.balance,tot.payStatus,ledger?ledger.code+' '+ledger.name:'',e.gstr2bClaimMonth||'',(e.billAttachments||e.attachments||[]).length?'Yes':'No',(e.receiptAttachments||[]).length?'Yes':'No',e.tallyVoucherNo||'',e.tallyVoucherDate||'']; }));
 
     await driveWriteSheetTab(sheetId, 'Employees', empRows);
     await driveWriteSheetTab(sheetId, 'Salary History', salRows);
@@ -2780,12 +2780,17 @@ function renderExpenses(c, actions){
     list = list.slice().sort((a,b)=> (b.billDate||'').localeCompare(a.billDate||''));
     const wrap = document.getElementById('expTableWrap');
     if(!list.length){ wrap.innerHTML = '<div class="empty"><div class="icon">🧾</div>No bills recorded yet.<div class="cta"><button class="btn" id="emptyNewExp">+ New Bill / Expense</button></div></div>'; document.getElementById('emptyNewExp').onclick=()=>openExpenseForm(); return; }
-    wrap.innerHTML = `<table><thead><tr><th>Voucher No.</th><th>Vendor</th><th>Date</th><th>Category</th><th class="num-cell">Net Payable</th><th class="num-cell">Balance</th><th>TDS</th><th>Tally</th><th>Status</th><th></th></tr></thead><tbody>
-      ${list.map(e=>{ const tot = calcExpenseTotals(e); return `<tr>
+    wrap.innerHTML = `<table><thead><tr><th>Voucher No.</th><th>Vendor</th><th>Date</th><th>Category</th><th class="num-cell">Net Payable</th><th class="num-cell">Balance</th><th>TDS</th><th>Docs</th><th>Tally</th><th>Status</th><th></th></tr></thead><tbody>
+      ${list.map(e=>{ const tot = calcExpenseTotals(e);
+        const hasBill = (e.billAttachments||e.attachments||[]).length>0;
+        const hasReceipt = (e.receiptAttachments||[]).length>0;
+        const needsReceipt = tot.payStatus==='Paid' || tot.payStatus==='Partial';
+        return `<tr>
         <td><b>${esc(e.voucherNo)}</b>${e.billNo?`<div style="color:var(--muted);font-size:11.5px;">${esc(e.billNo)}</div>`:''}${e.currency&&e.currency!=='INR'?` <span class="pill neutral">${esc(e.currency)}</span>`:''}${e.rcmApplicable?' <span class="pill warn">RCM</span>':''}</td>
         <td>${esc(e.vendorName||'—')}</td><td>${esc(e.billDate||'—')}</td><td>${esc(e.category||'—')}</td>
         <td class="num-cell">${money(tot.netPayable)}</td><td class="num-cell">${money(tot.balance)}</td>
         <td>${e.tdsApplicable?`<span class="pill accent">${esc((TDS_SECTION_BY_ID[e.tdsSectionId]||{}).oldCode||'')} ${e.tdsRate}%</span>`:'—'}</td>
+        <td><span class="pill ${hasBill?'good':'bad'}" title="Bill copy">📄 ${hasBill?'✓':'✕'}</span> <span class="pill ${hasReceipt?'good':(needsReceipt?'bad':'neutral')}" title="Payment receipt">🧾 ${hasReceipt?'✓':'✕'}</span></td>
         <td>${e.tallyVoucherNo?`<span class="pill good" title="#${esc(e.tallyVoucherNo)}">✓ Posted</span>`:'<span class="pill bad">Pending</span>'}</td>
         <td>${expStatusPill(tot.payStatus)}</td>
         <td class="no-print" style="white-space:nowrap;">
@@ -2802,7 +2807,20 @@ function renderExpenses(c, actions){
   draw();
 }
 
-let pendingExpFiles = [];
+/* Renders one attachment as name+size, a View link (opens in a new tab so images/PDFs show
+   inline for a quick visual check, not a forced download), a Download link, and — only when
+   editing (rmAttr provided) — a Remove button. Shared by the edit form and the read-only
+   print/confirm view so both always agree on what an attachment looks like. */
+function attachmentChipHtml(f, i, rmAttr){
+  return `<div class="file-chip">
+    <span class="fname">${esc(f.name)} (${Math.round(f.size/1024)} KB)</span>
+    <a href="${f.data}" target="_blank" rel="noopener" class="btn secondary sm">View</a>
+    <a href="${f.data}" download="${esc(f.name)}" class="btn secondary sm">Download</a>
+    ${rmAttr ? `<button type="button" data-${rmAttr}="${i}">✕</button>` : ''}
+  </div>`;
+}
+let pendingBillFiles = [];
+let pendingReceiptFiles = [];
 let pendingTallyFile = null;
 function openExpenseForm(expId){
   const isEdit = !!expId;
@@ -2815,7 +2833,8 @@ function openExpenseForm(expId){
   };
   if(isEdit && expIsLocked(e)){ toast('This bill is fully paid and locked. Enable editing in Settings → Bills & Expenses if this needs correcting.', true); return; }
   const baseRev = Number(e._rev)||0;
-  pendingExpFiles = isEdit ? (e.attachments||[]).slice() : [];
+  pendingBillFiles = isEdit ? (e.billAttachments || e.attachments || []).slice() : [];
+  pendingReceiptFiles = isEdit ? (e.receiptAttachments || []).slice() : [];
   pendingTallyFile = isEdit ? (e.tallyAttachment||null) : null;
   const activeAccounts = (ORG.chartOfAccounts||[]).filter(a=>a.active);
 
@@ -2879,10 +2898,22 @@ function openExpenseForm(expId){
       <div class="file-drop" id="tallyDropZone">Click to attach a Tally voucher screenshot/export (optional)</div>
       <input type="file" id="tallyFileInput" style="display:none;">
       <div id="tallyFileChip"></div>
-      <div class="section-label">Bill Attachments</div>
-      <div class="file-drop" id="expDropZone">Click to choose files, or drag &amp; drop bill scans/receipts</div>
-      <input type="file" id="expFileInput" multiple style="display:none;">
-      <div id="expFileChips"></div>
+      <div class="section-label">Supporting Documents</div>
+      <p class="hint" style="margin:-4px 0 8px;">Kept as two separate groups so it's easy to confirm at a glance whether both the bill and proof of payment are on file.</p>
+      <div class="grid cols-2">
+        <div>
+          <label style="font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-soft);">📄 Bill / Invoice Copy</label>
+          <div class="file-drop" id="billDropZone" style="margin-top:6px;">Click to choose, or drag &amp; drop the vendor's bill</div>
+          <input type="file" id="billFileInput" multiple style="display:none;">
+          <div id="billFileChips"></div>
+        </div>
+        <div>
+          <label style="font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-soft);">🧾 Payment Receipt / Proof of Payment</label>
+          <div class="file-drop" id="receiptDropZone" style="margin-top:6px;">Click to choose, or drag &amp; drop the payment receipt</div>
+          <input type="file" id="receiptFileInput" multiple style="display:none;">
+          <div id="receiptFileChips"></div>
+        </div>
+      </div>
       <div class="btn-row"><button type="submit" class="btn">Save Bill</button><button type="button" class="btn secondary" id="mCancel">Cancel</button></div>
     </form>
   `, true);
@@ -2944,25 +2975,43 @@ function openExpenseForm(expId){
     try{ pendingTallyFile = await readFileAsDataURL(f); drawTallyChip(); }catch(err){ toast('Could not read file: '+f.name, true); }
   }
   function drawTallyChip(){
-    document.getElementById('tallyFileChip').innerHTML = pendingTallyFile ? `<div class="file-chip"><span class="fname">${esc(pendingTallyFile.name)} (${Math.round(pendingTallyFile.size/1024)} KB)</span><button type="button" id="rmTallyFile">✕</button></div>` : '';
+    document.getElementById('tallyFileChip').innerHTML = pendingTallyFile ? `<div class="file-chip"><span class="fname">${esc(pendingTallyFile.name)} (${Math.round(pendingTallyFile.size/1024)} KB)</span><a href="${pendingTallyFile.data}" target="_blank" rel="noopener" class="btn secondary sm">View</a><button type="button" id="rmTallyFile">✕</button></div>` : '';
     const rm = document.getElementById('rmTallyFile'); if(rm) rm.onclick = ()=>{ pendingTallyFile=null; drawTallyChip(); };
   }
   drawTallyChip();
 
-  const dropZone = document.getElementById('expDropZone'); const fileInput = document.getElementById('expFileInput');
-  dropZone.onclick = ()=> fileInput.click();
-  dropZone.ondragover = (ev)=> ev.preventDefault();
-  dropZone.ondrop = async (ev)=>{ ev.preventDefault(); await handleExpFiles(ev.dataTransfer.files); };
-  fileInput.onchange = async ()=> handleExpFiles(fileInput.files);
-  async function handleExpFiles(fileList){
-    for(const f of fileList){ try{ pendingExpFiles.push(await readFileAsDataURL(f)); }catch(err){ toast('Could not read file: '+f.name, true); } }
-    drawExpChips();
+  /* attachmentChipHtml is module-scoped (defined near pendingBillFiles above) so the
+     print/confirm view can reuse it too. */
+  const billDropZone = document.getElementById('billDropZone'); const billFileInput = document.getElementById('billFileInput');
+  billDropZone.onclick = ()=> billFileInput.click();
+  billDropZone.ondragover = (ev)=> ev.preventDefault();
+  billDropZone.ondrop = async (ev)=>{ ev.preventDefault(); await handleBillFiles(ev.dataTransfer.files); };
+  billFileInput.onchange = async ()=> handleBillFiles(billFileInput.files);
+  async function handleBillFiles(fileList){
+    for(const f of fileList){ try{ pendingBillFiles.push(await readFileAsDataURL(f)); }catch(err){ toast('Could not read file: '+f.name, true); } }
+    drawBillChips();
   }
-  function drawExpChips(){
-    document.getElementById('expFileChips').innerHTML = pendingExpFiles.map((f,i)=>`<div class="file-chip"><span class="fname">${esc(f.name)} (${Math.round(f.size/1024)} KB)</span><button type="button" data-rmexp="${i}">✕</button></div>`).join('');
-    document.querySelectorAll('[data-rmexp]').forEach(b=>b.onclick=()=>{ pendingExpFiles.splice(Number(b.dataset.rmexp),1); drawExpChips(); });
+  function drawBillChips(){
+    document.getElementById('billFileChips').innerHTML = pendingBillFiles.map((f,i)=>attachmentChipHtml(f,i,'rmbill')).join('');
+    document.querySelectorAll('[data-rmbill]').forEach(b=>b.onclick=()=>{ pendingBillFiles.splice(Number(b.dataset.rmbill),1); drawBillChips(); });
   }
-  drawExpChips();
+  drawBillChips();
+
+  const receiptDropZone = document.getElementById('receiptDropZone'); const receiptFileInput = document.getElementById('receiptFileInput');
+  receiptDropZone.onclick = ()=> receiptFileInput.click();
+  receiptDropZone.ondragover = (ev)=> ev.preventDefault();
+  receiptDropZone.ondrop = async (ev)=>{ ev.preventDefault(); await handleReceiptFiles(ev.dataTransfer.files); };
+  receiptFileInput.onchange = async ()=> handleReceiptFiles(receiptFileInput.files);
+  async function handleReceiptFiles(fileList){
+    for(const f of fileList){ try{ pendingReceiptFiles.push(await readFileAsDataURL(f)); }catch(err){ toast('Could not read file: '+f.name, true); } }
+    drawReceiptChips();
+  }
+  function drawReceiptChips(){
+    document.getElementById('receiptFileChips').innerHTML = pendingReceiptFiles.map((f,i)=>attachmentChipHtml(f,i,'rmreceipt')).join('');
+    document.querySelectorAll('[data-rmreceipt]').forEach(b=>b.onclick=()=>{ pendingReceiptFiles.splice(Number(b.dataset.rmreceipt),1); drawReceiptChips(); });
+  }
+  drawReceiptChips();
+
 
   document.getElementById('expForm').onsubmit = async (ev)=>{
     ev.preventDefault();
@@ -2993,7 +3042,7 @@ async function submitExpenseForm(ev, isEdit, e){
     ledgerAccountId: fd.get('ledgerAccountId')||'',
     paidAmount: Number(fd.get('paidAmount'))||0, paidFrom: fd.get('paidFrom').trim(), notes: fd.get('notes').trim(),
     tallyVoucherNo: fd.get('tallyVoucherNo').trim(), tallyVoucherDate: fd.get('tallyVoucherDate')||'', tallyAttachment: pendingTallyFile,
-    attachments: pendingExpFiles
+    billAttachments: pendingBillFiles, receiptAttachments: pendingReceiptFiles
   };
   if(isEdit){ rec._rev = e._rev; rec.voucherNo = e.voucherNo; }
   else { rec.voucherNo = nextExpNo(); await saveOrg(); }
@@ -3022,6 +3071,8 @@ function openExpensePrint(id){
   const tot = calcExpenseTotals(e);
   const tdsSection = TDS_SECTION_BY_ID[e.tdsSectionId];
   const ledger = (ORG.chartOfAccounts||[]).find(a=>a.id===e.ledgerAccountId);
+  const billFiles = e.billAttachments || e.attachments || [];
+  const receiptFiles = e.receiptAttachments || [];
   const sym = CURRENCY_SYMBOLS[e.currency]||'₹';
   const logoHtml = ORG.logo ? `<img src="${ORG.logo}">` : (ORG.companyName||'C').charAt(0).toUpperCase();
   const html = `
@@ -3059,6 +3110,19 @@ function openExpensePrint(id){
         ${e.tallyVoucherNo?`<div class="regime-note">📋 Posted to Tally — Voucher #${esc(e.tallyVoucherNo)}${e.tallyVoucherDate?' dated '+esc(e.tallyVoucherDate):''}</div>`:''}
         ${e.notes?`<div class="regime-note"><b>Notes:</b> ${esc(e.notes)}</div>`:''}
         <div class="payslip-foot"><span>${esc(e.voucherNo)}</span><span>ELECTRONIC DOCUMENT</span></div>
+      </div>
+    </div>
+    <div class="no-print" style="margin-top:18px;">
+      <div class="section-label">Supporting Documents — Confirm What's On File</div>
+      <div class="grid cols-2">
+        <div>
+          <label style="font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-soft);">📄 Bill / Invoice Copy</label>
+          ${billFiles.length ? billFiles.map(f=>attachmentChipHtml(f)).join('') : '<div class="empty" style="padding:12px;color:var(--bad);">⚠ No bill copy attached</div>'}
+        </div>
+        <div>
+          <label style="font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-soft);">🧾 Payment Receipt</label>
+          ${receiptFiles.length ? receiptFiles.map(f=>attachmentChipHtml(f)).join('') : (tot.payStatus==='Paid'||tot.payStatus==='Partial' ? '<div class="empty" style="padding:12px;color:var(--bad);">⚠ No payment receipt attached, despite a payment recorded</div>' : '<div class="empty" style="padding:12px;color:var(--muted);">Not applicable — nothing paid yet</div>')}
+        </div>
       </div>
     </div>
     <div class="btn-row no-print" style="margin-top:16px;">
