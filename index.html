@@ -1453,6 +1453,52 @@ let pendingFiles = [];
 function readFileAsDataURL(file){
   return new Promise((res,rej)=>{ const r = new FileReader(); r.onload = ()=>res({name:file.name, type:file.type, size:file.size, data:r.result}); r.onerror = rej; r.readAsDataURL(file); });
 }
+/* Chrome blocks top-frame navigation straight to a data: URL (the "Not allowed to navigate
+   top frame to data URL" console error) — a security measure against disguised-download
+   phishing. blob: URLs aren't subject to that restriction, so every attachment view/download
+   in the app converts through one on the way to window.open() or a download link, instead of
+   using the raw data: URI directly. */
+let _attachmentRegistry = {}, _attachmentRegistryId = 0;
+function registerAttachment(f){
+  const id = 'att'+(_attachmentRegistryId++);
+  _attachmentRegistry[id] = f;
+  return id;
+}
+function dataURLtoBlob(dataURL){
+  const commaIdx = dataURL.indexOf(',');
+  const header = dataURL.slice(0, commaIdx);
+  const base64 = dataURL.slice(commaIdx+1);
+  const mimeMatch = header.match(/data:([^;]+);base64/);
+  const mime = mimeMatch ? mimeMatch[1] : 'application/octet-stream';
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for(let i=0;i<binary.length;i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], {type: mime});
+}
+function openAttachmentBlob(f){
+  try{
+    const url = URL.createObjectURL(dataURLtoBlob(f.data));
+    window.open(url, '_blank');
+    setTimeout(()=> URL.revokeObjectURL(url), 60000);
+  }catch(e){ toast('Could not open "'+f.name+'" — try Download instead.', true); }
+}
+function downloadAttachmentBlob(f){
+  try{
+    const url = URL.createObjectURL(dataURLtoBlob(f.data));
+    const a = document.createElement('a');
+    a.href = url; a.download = f.name;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(()=> URL.revokeObjectURL(url), 5000);
+  }catch(e){ toast('Could not download "'+f.name+'".', true); }
+}
+function openRegisteredAttachment(id){ const f = _attachmentRegistry[id]; if(f) openAttachmentBlob(f); }
+function downloadRegisteredAttachment(id){ const f = _attachmentRegistry[id]; if(f) downloadAttachmentBlob(f); }
+/* Wires every [data-attview]/[data-attdownload] button under root — call after any innerHTML
+   assignment that used attachmentChipHtml, so the buttons it rendered actually work. */
+function wireAttachmentButtons(root){
+  (root||document).querySelectorAll('[data-attview]').forEach(b=> b.onclick = ()=> openRegisteredAttachment(b.dataset.attview));
+  (root||document).querySelectorAll('[data-attdownload]').forEach(b=> b.onclick = ()=> downloadRegisteredAttachment(b.dataset.attdownload));
+}
 function openComplianceForm(){
   if(!EMPLOYEES.length){ toast('Add an employee first.', true); return; }
   pendingFiles = [];
@@ -1517,11 +1563,12 @@ function viewComplianceRecord(empId, recId){
     </div>
     <div class="field"><label>Remarks</label><div>${esc(rec.remarks||'—')}</div></div>
     <div class="section-label">Documents</div>
-    ${(rec.files||[]).length ? rec.files.map(f=>`<div class="file-chip"><span class="fname">${esc(f.name)}</span><a href="${f.data}" download="${esc(f.name)}" class="btn secondary sm">Download</a></div>`).join('') : '<div class="empty" style="padding:16px;">No documents attached.</div>'}
+    ${(rec.files||[]).length ? rec.files.map(f=>attachmentChipHtml(f)).join('') : '<div class="empty" style="padding:16px;">No documents attached.</div>'}
     <div class="divider"></div>
     <div class="btn-row"><button class="btn secondary" id="mCancel">Close</button></div>
   `, true);
   document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+  wireAttachmentButtons();
 }
 
 /* ============================= GOOGLE DRIVE SYNC ============================= */
@@ -2251,8 +2298,9 @@ function openDocForm(docId){
     drawDocChips();
   }
   function drawDocChips(){
-    document.getElementById('docFileChips').innerHTML = pendingDocFiles.map((f,i)=>`<div class="file-chip"><span class="fname">${esc(f.name)} (${Math.round(f.size/1024)} KB)</span><button type="button" data-rmdoc="${i}">✕</button></div>`).join('');
+    document.getElementById('docFileChips').innerHTML = pendingDocFiles.map((f,i)=>attachmentChipHtml(f,i,'rmdoc')).join('');
     document.querySelectorAll('[data-rmdoc]').forEach(b=>b.onclick=()=>{ pendingDocFiles.splice(Number(b.dataset.rmdoc),1); drawDocChips(); });
+    wireAttachmentButtons(document.getElementById('docFileChips'));
   }
   drawDocChips();
   document.getElementById('docForm').onsubmit = async (ev)=>{
@@ -2810,15 +2858,18 @@ function renderExpenses(c, actions){
   draw();
 }
 
-/* Renders one attachment as name+size, a View link (opens in a new tab so images/PDFs show
-   inline for a quick visual check, not a forced download), a Download link, and — only when
-   editing (rmAttr provided) — a Remove button. Shared by the edit form and the read-only
-   print/confirm view so both always agree on what an attachment looks like. */
+/* Renders one attachment as name+size, a View button (opens in a new tab via a blob: URL —
+   see wireAttachmentButtons — so images/PDFs show inline for a quick visual check without
+   hitting Chrome's block on top-frame data: URL navigation), a Download button, and — only
+   when editing (rmAttr provided) — a Remove button. Shared by the edit form and the
+   read-only confirm view so both always agree on what an attachment looks like. Callers
+   MUST call wireAttachmentButtons() after inserting this HTML into the DOM. */
 function attachmentChipHtml(f, i, rmAttr){
+  const regId = registerAttachment(f);
   return `<div class="file-chip">
     <span class="fname">${esc(f.name)} (${Math.round(f.size/1024)} KB)</span>
-    <a href="${f.data}" target="_blank" rel="noopener" class="btn secondary sm">View</a>
-    <a href="${f.data}" download="${esc(f.name)}" class="btn secondary sm">Download</a>
+    <button type="button" class="btn secondary sm" data-attview="${regId}">View</button>
+    <button type="button" class="btn secondary sm" data-attdownload="${regId}">Download</button>
     ${rmAttr ? `<button type="button" data-${rmAttr}="${i}">✕</button>` : ''}
   </div>`;
 }
@@ -2978,7 +3029,8 @@ function openExpenseForm(expId){
     try{ pendingTallyFile = await readFileAsDataURL(f); drawTallyChip(); }catch(err){ toast('Could not read file: '+f.name, true); }
   }
   function drawTallyChip(){
-    document.getElementById('tallyFileChip').innerHTML = pendingTallyFile ? `<div class="file-chip"><span class="fname">${esc(pendingTallyFile.name)} (${Math.round(pendingTallyFile.size/1024)} KB)</span><a href="${pendingTallyFile.data}" target="_blank" rel="noopener" class="btn secondary sm">View</a><button type="button" id="rmTallyFile">✕</button></div>` : '';
+    document.getElementById('tallyFileChip').innerHTML = pendingTallyFile ? `<div class="file-chip"><span class="fname">${esc(pendingTallyFile.name)} (${Math.round(pendingTallyFile.size/1024)} KB)</span><button type="button" class="btn secondary sm" id="tallyViewBtn">View</button><button type="button" id="rmTallyFile">✕</button></div>` : '';
+    const tallyViewBtn = document.getElementById('tallyViewBtn'); if(tallyViewBtn) tallyViewBtn.onclick = ()=> openAttachmentBlob(pendingTallyFile);
     const rm = document.getElementById('rmTallyFile'); if(rm) rm.onclick = ()=>{ pendingTallyFile=null; drawTallyChip(); };
   }
   drawTallyChip();
@@ -2997,6 +3049,7 @@ function openExpenseForm(expId){
   function drawBillChips(){
     document.getElementById('billFileChips').innerHTML = pendingBillFiles.map((f,i)=>attachmentChipHtml(f,i,'rmbill')).join('');
     document.querySelectorAll('[data-rmbill]').forEach(b=>b.onclick=()=>{ pendingBillFiles.splice(Number(b.dataset.rmbill),1); drawBillChips(); });
+    wireAttachmentButtons(document.getElementById('billFileChips'));
   }
   drawBillChips();
 
@@ -3012,6 +3065,7 @@ function openExpenseForm(expId){
   function drawReceiptChips(){
     document.getElementById('receiptFileChips').innerHTML = pendingReceiptFiles.map((f,i)=>attachmentChipHtml(f,i,'rmreceipt')).join('');
     document.querySelectorAll('[data-rmreceipt]').forEach(b=>b.onclick=()=>{ pendingReceiptFiles.splice(Number(b.dataset.rmreceipt),1); drawReceiptChips(); });
+    wireAttachmentButtons(document.getElementById('receiptFileChips'));
   }
   drawReceiptChips();
 
@@ -3075,13 +3129,14 @@ function viewAttachmentGroup(expId, group){
   const files = group==='bill' ? (e.billAttachments||e.attachments||[]) : (e.receiptAttachments||[]);
   const label = group==='bill' ? 'Bill / Invoice Copy' : 'Payment Receipt';
   if(!files.length){ toast(`No ${label.toLowerCase()} attached — add one via Edit.`, true); return; }
-  if(files.length===1){ window.open(files[0].data, '_blank'); return; }
+  if(files.length===1){ openAttachmentBlob(files[0]); return; }
   openModal(`
     <div class="modal-head"><h3>${esc(label)} — ${esc(e.voucherNo)}</h3><button class="modal-close" id="mClose">✕</button></div>
     ${files.map(f=>attachmentChipHtml(f)).join('')}
     <div class="btn-row"><button class="btn secondary" id="mCancel">Close</button></div>
   `, true);
   document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+  wireAttachmentButtons();
 }
 
 
