@@ -341,7 +341,7 @@ const DEFAULT_ORG = {
   txnSeq: {},
   /* 3-letter codes used in transaction numbers, e.g. QTE2627001 = QTE + FY2026-27 + seq 001.
      Editable in Settings → Transactions. */
-  txnPrefixes: { ENQUIRY:'ENQ', QUOTATION:'QTE', PO:'POR', INVOICE:'INV', CREDIT_NOTE:'CRN', DELIVERY_NOTE:'DCN' },
+  txnPrefixes: { ENQUIRY:'ENQ', QUOTATION:'QTE', PO:'POR', PROFORMA:'PFI', INVOICE:'INV', CREDIT_NOTE:'CRN', DELIVERY_NOTE:'DCN' },
   expPrefix: 'EXP', expSeq: {}, allowFinalisedExpenseEdit: false,
   /* Chart of Accounts — a shared reference list for tagging bills to a ledger account.
      Optional/additive; safe to leave a bill untagged. Editable in Settings. */
@@ -367,6 +367,9 @@ const DEFAULT_ORG = {
     { id:'COA-5600', code:'5600', name:'Consumables',               type:'Expense',   active:true },
     { id:'COA-5700', code:'5700', name:'Miscellaneous Expenses',    type:'Expense',   active:true }
   ],
+  /* Vessel names used in Proforma-consolidation — remembered here so they can be picked
+     from a list next time instead of retyped. Grows automatically as new names are used. */
+  vessels: [],
   allowFinalisedTxnEdit: false,
   gdrive: { clientId:'870827159813-4g2i299mv9qduqpmju40mpr5f63uvgns.apps.googleusercontent.com', connected:false, folderId:null, fileId:null, backupsFolderId:null, sheetId:null, lastSynced:null, email:'',
     /* Pinned IDs: when set, every device uses these exact Drive resources directly — no
@@ -461,6 +464,7 @@ function backfillOrgDefaults(){
   if(!ORG.expSeq) ORG.expSeq = {};
   if(ORG.allowFinalisedExpenseEdit===undefined) ORG.allowFinalisedExpenseEdit = false;
   if(!ORG.chartOfAccounts) ORG.chartOfAccounts = JSON.parse(JSON.stringify(DEFAULT_ORG.chartOfAccounts));
+  if(!ORG.vessels) ORG.vessels = [];
   if(ORG.allowFinalisedTxnEdit===undefined) ORG.allowFinalisedTxnEdit = false;
   if(ORG.gstin===undefined) ORG.gstin = '';
   /* Add new org-profile fields here going forward, not just in DEFAULT_ORG — this function
@@ -1960,8 +1964,8 @@ async function driveExportSheet(silent){
     const docRows = [['Document Name','Category','Insurance Type','Cert/Policy No.','Issuer','Holder Type','Holder','Issue Date','Expiry Date','Lifetime','Status','Premium','Sum Insured','Files Attached']]
       .concat(COMPANY_DOCS.map(d=>[d.docName,d.docCategory,d.insuranceType,d.certNo,d.issuer,d.holderType,d.holderName,d.issueDate,d.expiryDate,d.isLifetime?'Yes':'No',docStatus(d),d.premiumAmount||0,d.sumInsured||0,(d.attachments||[]).length]));
 
-    const txnRows = [['Txn No.','Category','Direction','Party','Date','Due Date','Status','Reference','Subject','Subtotal','GST Mode','Tax Amount','Grand Total','Revision No.']]
-      .concat(TRANSACTIONS.map(t=>{ const tot = calcTxnTotals(t); return [t.txnNo,TXN_CATEGORIES[t.txnCategory]?TXN_CATEGORIES[t.txnCategory].label:t.txnCategory,t.txnDirection,t.partyName,t.txnDate,t.dueDate,t.status,(t.referenceType||'')+' '+(t.reference||''),t.subject,tot.subtotal,t.gstMode,tot.taxAmount,tot.grandTotal,t.revisionNo||0]; }));
+    const txnRows = [['Txn No.','Category','Direction','Party','Date','Due Date','Status','Reference','Subject','Subtotal','GST Mode','Tax Amount','Grand Total','Revision No.','Fund Received','Fund Received Date','Linked Invoice','Linked Proforma']]
+      .concat(TRANSACTIONS.map(t=>{ const tot = calcTxnTotals(t); return [t.txnNo,TXN_CATEGORIES[t.txnCategory]?TXN_CATEGORIES[t.txnCategory].label:t.txnCategory,t.txnDirection,t.partyName,t.txnDate,t.dueDate,t.status,(t.referenceType||'')+' '+(t.reference||''),t.subject,tot.subtotal,t.gstMode,tot.taxAmount,tot.grandTotal,t.revisionNo||0,t.fundReceivedAmount||'',t.fundReceivedDate||'',t.linkedInvoice||'',t.linkedProforma||'']; }));
 
     const expRows = [['Voucher No.','Vendor','Bill No.','Bill Date','Due Date','Category','Currency','Bill Amount (INR)','GST Mode','RCM','GST Amount','TDS Section','TDS Rate','TDS Amount','Net Payable','Paid','Balance','Status','Ledger Account','GSTR-2B Claim Month','Bill Attached','Receipt Attached','Payment Mode','Payment Reference','Date of Payment','Tally Voucher No.','Tally Voucher Date']]
       .concat(EXPENSES.map(e=>{ const tot = calcExpenseTotals(e); const sec = TDS_SECTION_BY_ID[e.tdsSectionId]; const ledger = (ORG.chartOfAccounts||[]).find(a=>a.id===e.ledgerAccountId);
@@ -2385,15 +2389,16 @@ function deleteDoc(id){
    exact per-category reference-type matrix and full revision-diff viewer are simplified
    here to a single reference field and a stored revision history). */
 const TXN_CATEGORIES = {
-  ENQUIRY:       { label:'Enquiry',         prefix:'ENQ',  statuses:['Draft','Sent','Approved','Completed'], lockDirection:'Outgoing' },
-  QUOTATION:     { label:'Quotation',       prefix:'QUOT', statuses:['Draft','Sent','Approved','Completed'] },
-  PO:            { label:'Purchase Order',  prefix:'PO',   statuses:['Draft','Sent','Approved','Completed'] },
-  INVOICE:       { label:'Invoice',         prefix:'INV',  statuses:['Draft','Sent','Approved','Completed','Paid'] },
-  CREDIT_NOTE:   { label:'Credit Note',     prefix:'CN',   statuses:['Draft','Sent','Approved','Completed'] },
-  DELIVERY_NOTE: { label:'Delivery Note',   prefix:'DN',   statuses:['Issued','Acknowledged','Invoiced'] }
+  ENQUIRY:       { label:'Enquiry',           prefix:'ENQ',  statuses:['Draft','Sent','Approved','Completed'], lockDirection:'Outgoing' },
+  QUOTATION:     { label:'Quotation',         prefix:'QUOT', statuses:['Draft','Sent','Approved','Completed'] },
+  PO:            { label:'Purchase Order',    prefix:'PO',   statuses:['Draft','Sent','Approved','Completed'] },
+  PROFORMA:      { label:'Proforma Invoice',  prefix:'PFI',  statuses:['Draft','Sent','Fund Received','Converted'] },
+  INVOICE:       { label:'Invoice',           prefix:'INV',  statuses:['Draft','Sent','Approved','Completed','Paid'] },
+  CREDIT_NOTE:   { label:'Credit Note',       prefix:'CN',   statuses:['Draft','Sent','Approved','Completed'] },
+  DELIVERY_NOTE: { label:'Delivery Note',     prefix:'DN',   statuses:['Issued','Acknowledged','Invoiced'] }
 };
-const TXN_LOCKED_STATUSES = ['Completed','Paid','Invoiced'];
-const TXN_REFERENCE_TYPES = ['Ref Email Dated','Ref Meeting Dated','Ref Enquiry Dated','Ref PO No','Ref Quotation No','Ref Invoice No','Ref Work Order','Ref Indent No','Ref RFQ No'];
+const TXN_LOCKED_STATUSES = ['Completed','Paid','Invoiced','Converted'];
+const TXN_REFERENCE_TYPES = ['Ref Email Dated','Ref Meeting Dated','Ref Enquiry Dated','Ref PO No','Ref Quotation No','Ref Proforma Invoice No','Ref Invoice No','Ref Work Order','Ref Indent No','Ref RFQ No'];
 function txnIsLocked(t){ return TXN_LOCKED_STATUSES.includes(t.status) && !ORG.allowFinalisedTxnEdit; }
 /* Indian financial year short-form: "2627" for FY2026-27 (Apr 2026 – Mar 2027). */
 function currentFYShort(){
@@ -2427,8 +2432,9 @@ function txnStatusPill(status){
 }
 
 function renderTransactions(c, actions){
-  actions.innerHTML = `<button class="btn" id="newTxnBtn">+ New Transaction</button>`;
+  actions.innerHTML = `<button class="btn secondary" id="consolidatePfiBtn">Consolidate Proformas → GST/Non-GST</button> <button class="btn" id="newTxnBtn">+ New Transaction</button>`;
   actions.querySelector('#newTxnBtn').onclick = ()=> openTxnForm();
+  actions.querySelector('#consolidatePfiBtn').onclick = ()=> openConsolidateProformaModal();
 
   const outstandingInvoices = TRANSACTIONS.filter(t=>t.txnCategory==='INVOICE' && t.status!=='Paid' && t.status!=='Draft');
   const outstandingTotal = outstandingInvoices.reduce((s,t)=> s+(calcTxnTotals(t).grandTotal), 0);
@@ -2471,18 +2477,20 @@ function renderTransactions(c, actions){
       return `<div class="section-label" style="margin-top:16px;">${TXN_CATEGORIES[k].label} (${list.length})</div>
       <table><thead><tr><th>Txn No.</th><th>Party</th><th>Date</th><th class="num-cell">Amount</th><th>Status</th><th></th></tr></thead><tbody>
         ${list.map(t=>{ const tot = calcTxnTotals(t); return `<tr>
-          <td><b>${esc(t.txnNo)}</b>${t.revisionNo?` <span class="pill neutral">Rev-${t.revisionNo}</span>`:''}</td>
+          <td><b>${esc(t.txnNo)}</b>${t.revisionNo?` <span class="pill neutral">Rev-${t.revisionNo}</span>`:''}${t.linkedInvoice?` <span class="pill good" title="Converted to ${esc(t.linkedInvoice)}">→ ${esc(t.linkedInvoice)}</span>`:''}${(t.linkedInvoiceGST||t.linkedInvoiceNonGST)?` <span class="pill good" title="Consolidated: GST ${esc(t.linkedInvoiceGST||'—')}, Non-GST ${esc(t.linkedInvoiceNonGST||'—')}">→ ${esc(t.linkedInvoiceGST||'')} / ${esc(t.linkedInvoiceNonGST||'')}</span>`:''}${t.linkedProforma?` <span class="pill neutral" title="From proforma">from ${esc(t.linkedProforma)}</span>`:''}${(t.linkedProformas&&t.linkedProformas.length)?` <span class="pill neutral" title="Consolidated from ${esc(t.linkedProformas.join(', '))}">from ${t.linkedProformas.length} proforma(s)</span>`:''}</td>
           <td>${esc(t.partyName||'—')}</td><td>${esc(t.txnDate||'—')}</td>
           <td class="num-cell">${money(tot.grandTotal)}</td><td>${txnStatusPill(t.status)}</td>
           <td class="no-print" style="white-space:nowrap;">
             <button class="btn secondary sm" data-view="${t.id}">View / Print</button>
             <button class="btn secondary sm" data-edit="${t.id}">Edit</button>
+            ${k==='PROFORMA' && !t.linkedInvoice && !t.linkedInvoiceGST && !t.linkedInvoiceNonGST ? `<button class="btn sm" data-convert="${t.id}">Convert to Invoice</button>` : ''}
             <button class="btn danger sm" data-del="${t.id}">Delete</button>
           </td></tr>`; }).join('')}
       </tbody></table>`;
     }).join('');
     wrap.querySelectorAll('[data-view]').forEach(b=> b.onclick=()=>openTxnPrint(b.dataset.view));
     wrap.querySelectorAll('[data-edit]').forEach(b=> b.onclick=()=>openTxnForm(b.dataset.edit));
+    wrap.querySelectorAll('[data-convert]').forEach(b=> b.onclick=()=>convertToInvoice(b.dataset.convert));
     wrap.querySelectorAll('[data-del]').forEach(b=> b.onclick=()=>deleteTxn(b.dataset.del));
   }
   ['txnSearch','txnCatFilter','txnStatusFilter'].forEach(id=> document.getElementById(id).addEventListener('input', draw));
@@ -2491,18 +2499,21 @@ function renderTransactions(c, actions){
 
 let txnLineItems = [];
 function blankLineItem(){ return { id: uid(), description:'', hsn:'', qty:1, rate:0, gstPct:18 }; }
-function openTxnForm(txnId){
+function openTxnForm(txnId, prefill){
   const isEdit = !!txnId;
-  const t = isEdit ? TRANSACTIONS.find(x=>x.id===txnId) : {
+  const blank = {
     txnCategory:'', txnDirection:'Outgoing', partyId:'', txnDate:new Date().toISOString().slice(0,10),
     dueDate:'', referenceType:'', reference:'', subject:'', status:'Draft', gstMode:'Intra',
     poNumber:'', poDate:'', poTerms:'', panNumber:'', supplyDateTime:'', placeOfSupply:'', vehicleNo:'',
     dnTransportMode:'Local', dnVehicleNo:'', dnPlaceOfDelivery:'', dnType:'Workshop', dnLinkedInvoice:'', dnSignedStatus:'Pending', dnDeliveryDateTime:'',
+    fundReceivedAmount:'', fundReceivedDate:'', fundReceivedVia:'', linkedInvoice:'', linkedProforma:'',
+    linkedInvoiceGST:'', linkedInvoiceNonGST:'', linkedProformas:[],
     terms:'', notes:'', items:[blankLineItem()]
   };
+  const t = isEdit ? TRANSACTIONS.find(x=>x.id===txnId) : Object.assign(blank, prefill||{});
   if(isEdit && txnIsLocked(t)){ toast(`This ${TXN_CATEGORIES[t.txnCategory].label.toLowerCase()} is finalised (${t.status}) and locked. Enable editing in Settings → Transactions if this needs correcting.`, true); return; }
   const baseRev = Number(t._rev)||0;
-  txnLineItems = isEdit ? JSON.parse(JSON.stringify(t.items||[blankLineItem()])) : [blankLineItem()];
+  txnLineItems = JSON.parse(JSON.stringify((t.items&&t.items.length) ? t.items : [blankLineItem()]));
 
   openModal(`
     <div class="modal-head"><h3>${isEdit?'Edit':'New'} Transaction</h3><button class="modal-close" id="mClose">✕</button></div>
@@ -2562,7 +2573,17 @@ function openTxnForm(txnId){
         <div class="field"><label>Supply Date/Time</label><input type="datetime-local" name="supplyDateTime" value="${esc(t.supplyDateTime)}"></div>
         <div class="field"><label>Place of Supply</label><input type="text" name="placeOfSupply" value="${esc(t.placeOfSupply)}"></div>
         <div class="field"><label>Vehicle No.</label><input type="text" name="vehicleNo" value="${esc(t.vehicleNo)}"></div>
-      </div>`;
+      </div>
+      ${t.linkedProforma ? `<div class="hint">Converted from Proforma Invoice <b>${esc(t.linkedProforma)}</b>.</div>` : ''}`;
+    if(cat==='PROFORMA') return `
+      <div class="section-label">Fund Received</div>
+      <p class="hint" style="margin:-4px 0 8px;">Record what actually came in once the customer pays against this proforma — this is what "Convert to Invoice" carries over, since the final invoice should reflect funds actually received, not just what was quoted.</p>
+      <div class="grid cols-3">
+        <div class="field"><label>Fund Received Amount (₹)</label><input type="number" min="0" step="0.01" name="fundReceivedAmount" value="${t.fundReceivedAmount||''}"></div>
+        <div class="field"><label>Fund Received Date</label><input type="date" name="fundReceivedDate" value="${esc(t.fundReceivedDate)}"></div>
+        <div class="field"><label>Received Via</label><input type="text" name="fundReceivedVia" value="${esc(t.fundReceivedVia)}" placeholder="e.g. Bank transfer, ref/UTR"></div>
+      </div>
+      ${t.linkedInvoice ? `<div class="hint">Already converted to Invoice <b>${esc(t.linkedInvoice)}</b>.</div>` : ''}`;
     if(cat==='DELIVERY_NOTE'){
       const invoices = TRANSACTIONS.filter(x=>x.txnCategory==='INVOICE');
       return `
@@ -2654,6 +2675,10 @@ async function submitTxnForm(ev, isEdit, t){
     panNumber: fd.get('panNumber')||'', supplyDateTime: fd.get('supplyDateTime')||'', placeOfSupply: fd.get('placeOfSupply')||'', vehicleNo: fd.get('vehicleNo')||'',
     dnTransportMode: fd.get('dnTransportMode')||'', dnVehicleNo: fd.get('dnVehicleNo')||'', dnPlaceOfDelivery: fd.get('dnPlaceOfDelivery')||'',
     dnType: fd.get('dnType')||'', dnLinkedInvoice: fd.get('dnLinkedInvoice')||'', dnSignedStatus: fd.get('dnSignedStatus')||'', dnDeliveryDateTime: fd.get('dnDeliveryDateTime')||'',
+    fundReceivedAmount: fd.get('fundReceivedAmount')!==null ? (Number(fd.get('fundReceivedAmount'))||0) : (t.fundReceivedAmount||''),
+    fundReceivedDate: fd.get('fundReceivedDate')||t.fundReceivedDate||'', fundReceivedVia: (fd.get('fundReceivedVia')||t.fundReceivedVia||'').trim(),
+    linkedInvoice: t.linkedInvoice||'', linkedProforma: t.linkedProforma||'',
+    linkedInvoiceGST: t.linkedInvoiceGST||'', linkedInvoiceNonGST: t.linkedInvoiceNonGST||'', linkedProformas: t.linkedProformas||[],
     terms: fd.get('terms').trim(), notes: fd.get('notes').trim(), items,
     revisionNo: t.revisionNo||0, revisionHistory: t.revisionHistory||[]
   };
@@ -2668,8 +2693,242 @@ async function submitTxnForm(ev, isEdit, t){
   }
   tagRecord(rec, !isEdit);
   if(isEdit){ const idx = TRANSACTIONS.findIndex(x=>x.id===t.id); TRANSACTIONS[idx]=rec; } else { TRANSACTIONS.push(rec); }
+  // Converting a Proforma Invoice: once the resulting Invoice is actually saved (and so has
+  // its real txnNo), link back to the source PI and lock it — it's been converted, so further
+  // edits to the proforma itself no longer make sense.
+  if(!isEdit && rec.linkedProforma){
+    const pi = TRANSACTIONS.find(x=> x.txnCategory==='PROFORMA' && x.txnNo===rec.linkedProforma);
+    if(pi){ pi.linkedInvoice = rec.txnNo; pi.status = 'Converted'; tagRecord(pi, false); }
+  }
   await saveTransactions();
   closeModal(); toast(isEdit?'Transaction updated.':`${rec.txnNo} created.`); render();
+}
+/* Starts a new Invoice pre-filled from a Proforma Invoice's party, items, and terms, once
+   funds have actually come in. Doesn't try to auto-reconcile the amount if the fund received
+   differs from the original proforma (bank charges, partial payment, forex, etc. all need a
+   human to look at) — instead it opens the normal edit form, pre-filled, so the figures can
+   be adjusted to match what was actually received before it's saved as the final invoice. */
+function convertToInvoice(piId){
+  const pi = TRANSACTIONS.find(x=>x.id===piId); if(!pi) return;
+  if(pi.linkedInvoice){ toast(`Already converted to Invoice ${pi.linkedInvoice}.`, true); return; }
+  if(pi.linkedInvoiceGST || pi.linkedInvoiceNonGST){ toast(`Already consolidated into ${pi.linkedInvoiceGST||''} (GST) / ${pi.linkedInvoiceNonGST||''} (Non-GST).`, true); return; }
+  openModal(`
+    <div class="modal-head"><h3>Convert to Invoice</h3><button class="modal-close" id="mClose">✕</button></div>
+    <p>This opens a new Invoice pre-filled from <b>${esc(pi.txnNo)}</b> (${esc(pi.partyName)}). Review and adjust the amounts to match what was actually received${pi.fundReceivedAmount?` (recorded: ${money2(Number(pi.fundReceivedAmount))})`:''} before saving — the proforma will then lock as converted.</p>
+    <div class="btn-row"><button class="btn" id="confirmConvert">Continue to Invoice</button><button class="btn secondary" id="mCancel">Cancel</button></div>
+  `);
+  document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+  document.getElementById('confirmConvert').onclick = ()=>{
+    closeModal();
+    openTxnForm(null, {
+      txnCategory:'INVOICE', txnDirection: pi.txnDirection, partyId: pi.partyId, txnDate:new Date().toISOString().slice(0,10),
+      dueDate:'', referenceType:'Ref Proforma Invoice No', reference: pi.txnNo, subject: pi.subject,
+      status:'Draft', gstMode: pi.gstMode, items: JSON.parse(JSON.stringify(pi.items||[])),
+      terms: pi.terms, notes: `Converted from ${pi.txnNo}.${pi.fundReceivedAmount?` Fund received: ${money2(Number(pi.fundReceivedAmount))}${pi.fundReceivedDate?' on '+pi.fundReceivedDate:''}${pi.fundReceivedVia?' via '+pi.fundReceivedVia:''}.`:''}`,
+      linkedProforma: pi.txnNo
+    });
+  };
+}
+let consolidateVesselRows = [];
+function blankVesselRow(){ return { name:'', count:1, exportDays:0, rate:0 }; }
+/* Consolidates several Proforma Invoices for a month into exactly two Invoices — one GST
+   (Domestic/Indian-waters portion), one Non-GST (Export/international-waters portion) —
+   using the exact apportionment worked out from the company's own working sheet:
+   1. Per vessel: Domestic Days = days in month − Export Days (entered per vessel per month).
+   2. Technical Service Fee (a flat per-day rate) splits cleanly: Export days → Non-GST,
+      Domestic days → GST @18%.
+   3. "Other Services" is billed as one lump sum per PI, not a clean daily rate, so it's
+      backed into: pool = (sum of selected PIs) − (Export Tech Fee) − (Domestic Tech Fee incl.
+      GST); that pool is treated as GST-inclusive (÷1.18 for its taxable value), spread evenly
+      across every vessel-day in the fleet that month to get one notional per-vessel-per-day
+      rate, then applied to each vessel's OWN Domestic Days for its GST-invoice share. Whatever
+      isn't captured that way becomes the Export/Non-GST Other Services amount, as a residual —
+      not separately rated, exactly as in the working sheet.
+   Verified against the company's real working file before shipping: every intermediate and
+   final figure matched exactly. */
+function calcConsolidation(monthDays, vessels, piTotal){
+  let totalExportTech = 0, totalDomesticTechInvoice = 0, totalDomesticTech = 0;
+  const perVessel = vessels.map(v=>{
+    const count = Number(v.count)||0, exportDays = Number(v.exportDays)||0, rate = Number(v.rate)||0;
+    const domesticDays = monthDays - exportDays;
+    const exportTech = domesticDays>=0 ? exportDays*count*rate : 0;
+    const domesticTech = domesticDays>0 ? domesticDays*count*rate : 0;
+    const domesticTechGst = domesticTech*0.18;
+    totalExportTech += exportTech; totalDomesticTech += domesticTech; totalDomesticTechInvoice += domesticTech+domesticTechGst;
+    return { ...v, domesticDays, exportTech, domesticTech, domesticTechInvoice: domesticTech+domesticTechGst };
+  });
+  const otherServicesPool = piTotal - totalExportTech - totalDomesticTechInvoice;
+  const otherServicesTaxable = otherServicesPool / 1.18;
+  const totalVesselCount = vessels.reduce((s,v)=> s+(Number(v.count)||0), 0);
+  const perDayPerVesselRate = (totalVesselCount>0 && monthDays>0) ? otherServicesTaxable/totalVesselCount/monthDays : 0;
+  let totalDomesticOtherInvoice = 0, totalDomesticOther = 0;
+  perVessel.forEach(v=>{
+    const domesticOther = v.domesticDays>0 ? perDayPerVesselRate*v.domesticDays : 0;
+    v.domesticOther = domesticOther; v.domesticOtherInvoice = domesticOther*1.18;
+    totalDomesticOther += domesticOther; totalDomesticOtherInvoice += v.domesticOtherInvoice;
+  });
+  const exportOtherResidual = piTotal - totalExportTech - totalDomesticTechInvoice - totalDomesticOtherInvoice;
+  return {
+    perVessel, totalExportTech, totalDomesticTech, totalDomesticTechInvoice,
+    otherServicesPool, otherServicesTaxable, perDayPerVesselRate,
+    totalDomesticOther, totalDomesticOtherInvoice, exportOtherResidual,
+    nonGstInvoiceTotal: totalExportTech + exportOtherResidual,
+    gstInvoiceTaxable: totalDomesticTech + totalDomesticOther,
+    gstInvoiceTotal: totalDomesticTechInvoice + totalDomesticOtherInvoice
+  };
+}
+function openConsolidateProformaModal(){
+  const defaultMonth = new Date().toISOString().slice(0,7);
+  consolidateVesselRows = [blankVesselRow()];
+  openModal(`
+    <div class="modal-head"><h3>Consolidate Proformas → GST / Non-GST Invoices</h3><button class="modal-close" id="mClose">✕</button></div>
+    <p class="hint">Select every Proforma Invoice this batch covers, enter each vessel's days for the month, and this produces exactly two Invoices — one GST (Indian waters), one Non-GST (export) — that between them account for the full selected total.</p>
+    <div class="grid cols-2">
+      <div class="field"><label>Month</label><input type="month" id="consMonth" value="${defaultMonth}"></div>
+      <div class="field"><label>Days in Month</label><input type="number" min="1" max="31" id="consMonthDays" value="31"></div>
+    </div>
+    <div class="section-label">Proforma Invoices to Include</div>
+    <div id="consPiList"></div>
+    <div class="section-label" style="display:flex;align-items:center;justify-content:space-between;">
+      <span>Vessels This Month</span><button type="button" class="btn secondary sm" id="addVesselRow">+ Add Vessel</button>
+    </div>
+    <div id="consVesselWrap"></div>
+    <div id="consPreview"></div>
+    <div class="btn-row"><button class="btn" id="confirmConsolidate">Create Both Invoices</button><button class="btn secondary" id="mCancel">Cancel</button></div>
+  `, true);
+  document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+
+  function setMonthDaysFromMonth(){
+    const [y,m] = document.getElementById('consMonth').value.split('-').map(Number);
+    if(y && m) document.getElementById('consMonthDays').value = new Date(y, m, 0).getDate();
+  }
+  document.getElementById('consMonth').addEventListener('change', ()=>{ setMonthDaysFromMonth(); drawPiList(); });
+  setMonthDaysFromMonth();
+
+  function eligiblePIs(){
+    const month = document.getElementById('consMonth').value;
+    return TRANSACTIONS.filter(t=> t.txnCategory==='PROFORMA' && !t.linkedInvoice && !t.linkedInvoiceGST && !t.linkedInvoiceNonGST && (t.txnDate||'').slice(0,7)===month);
+  }
+  function drawPiList(){
+    const pis = eligiblePIs();
+    const wrap = document.getElementById('consPiList');
+    if(!pis.length){ wrap.innerHTML = '<div class="empty" style="padding:12px;">No unconverted Proforma Invoices found for this month.</div>'; drawPreview(); return; }
+    wrap.innerHTML = pis.map(p=>`<label class="checkline" style="display:flex;justify-content:space-between;padding:4px 0;">
+      <span><input type="checkbox" class="consPiChk" value="${p.id}" checked> ${esc(p.txnNo)} — ${esc(p.partyName)}</span>
+      <b>${money2(calcTxnTotals(p).grandTotal)}</b>
+    </label>`).join('');
+    wrap.querySelectorAll('.consPiChk').forEach(chk=> chk.addEventListener('change', drawPreview));
+    drawPreview();
+  }
+  function selectedPiTotal(){
+    const ids = Array.from(document.querySelectorAll('.consPiChk:checked')).map(c=>c.value);
+    return TRANSACTIONS.filter(t=> ids.includes(t.id)).reduce((s,t)=> s+calcTxnTotals(t).grandTotal, 0);
+  }
+  function drawVesselRows(){
+    document.getElementById('consVesselWrap').innerHTML = `
+      <datalist id="vesselNamesList">${(ORG.vessels||[]).map(v=>`<option value="${esc(v)}">`).join('')}</datalist>
+      ${consolidateVesselRows.map((v,i)=>`
+      <div class="grid cols-5" style="align-items:end;margin-bottom:6px;">
+        <div class="field" style="grid-column:span 2;margin-bottom:0;"><label>Vessel Name</label><input type="text" list="vesselNamesList" data-vf="${i}-name" value="${esc(v.name)}" placeholder="Type or pick a saved vessel"></div>
+        <div class="field" style="margin-bottom:0;"><label>Vessel Count</label>
+          <div style="display:flex;align-items:center;gap:4px;">
+            <button type="button" class="btn secondary sm" data-vstep="${i}:-1" style="min-width:30px;">−</button>
+            <input type="number" min="0" step="1" data-vf="${i}-count" value="${v.count}" style="text-align:center;">
+            <button type="button" class="btn secondary sm" data-vstep="${i}:1" style="min-width:30px;">+</button>
+          </div>
+        </div>
+        <div class="field" style="margin-bottom:0;"><label>Export Days This Month</label><input type="number" min="0" step="1" data-vf="${i}-exportDays" value="${v.exportDays}"></div>
+        <div class="field" style="margin-bottom:0;display:flex;gap:6px;align-items:end;"><div style="flex:1;"><label>Tech Fee Rate/Day</label><input type="number" min="0" step="0.01" data-vf="${i}-rate" value="${v.rate}"></div><button type="button" class="btn danger sm" data-rmvessel="${i}">✕</button></div>
+      </div>`).join('')}`;
+    document.querySelectorAll('[data-vf]').forEach(inp=> inp.addEventListener('input', ()=>{
+      const [i,field] = inp.dataset.vf.split('-');
+      consolidateVesselRows[Number(i)][field] = field==='name' ? inp.value : Number(inp.value)||0;
+      drawPreview();
+    }));
+    document.querySelectorAll('[data-vstep]').forEach(b=> b.onclick=()=>{
+      const [i,delta] = b.dataset.vstep.split(':').map(Number);
+      consolidateVesselRows[i].count = Math.max(0, (Number(consolidateVesselRows[i].count)||0) + delta);
+      drawVesselRows(); drawPreview();
+    });
+    document.querySelectorAll('[data-rmvessel]').forEach(b=> b.onclick=()=>{ consolidateVesselRows.splice(Number(b.dataset.rmvessel),1); if(!consolidateVesselRows.length) consolidateVesselRows.push(blankVesselRow()); drawVesselRows(); drawPreview(); });
+  }
+  document.getElementById('addVesselRow').onclick = ()=>{ consolidateVesselRows.push(blankVesselRow()); drawVesselRows(); drawPreview(); };
+  function drawPreview(){
+    const monthDays = Number(document.getElementById('consMonthDays').value)||31;
+    const piTotal = selectedPiTotal();
+    const calc = calcConsolidation(monthDays, consolidateVesselRows, piTotal);
+    document.getElementById('consPreview').innerHTML = `
+      <div class="divider"></div>
+      <div class="grid cols-3">
+        <div><label>Selected PI Total</label><div><b>${money2(piTotal)}</b></div></div>
+        <div><label>Export Tech Fee (Non-GST)</label><div>${money2(calc.totalExportTech)}</div></div>
+        <div><label>Domestic Tech Fee (GST incl.)</label><div>${money2(calc.totalDomesticTechInvoice)}</div></div>
+        <div><label>Other Services Pool (GST incl.)</label><div>${money2(calc.otherServicesPool)}</div></div>
+        <div><label>Domestic Other Services (GST incl.)</label><div>${money2(calc.totalDomesticOtherInvoice)}</div></div>
+        <div><label>Export Other Services (residual)</label><div>${money2(calc.exportOtherResidual)}</div></div>
+      </div>
+      <div class="divider"></div>
+      <div class="grid cols-2">
+        <div><label style="color:var(--bad);">NON-GST INVOICE TOTAL</label><div><b>${money2(calc.nonGstInvoiceTotal)}</b></div></div>
+        <div><label style="color:var(--good);">GST INVOICE TOTAL</label><div><b>${money2(calc.gstInvoiceTotal)}</b></div></div>
+      </div>
+      <div class="hint">Sum of both: ${money2(calc.nonGstInvoiceTotal+calc.gstInvoiceTotal)} — should match the selected PI total above.</div>
+    `;
+  }
+  drawPiList(); drawVesselRows(); drawPreview();
+
+  document.getElementById('confirmConsolidate').onclick = async ()=>{
+    const selectedIds = Array.from(document.querySelectorAll('.consPiChk:checked')).map(c=>c.value);
+    if(!selectedIds.length){ toast('Select at least one Proforma Invoice.', true); return; }
+    const selectedPIs = TRANSACTIONS.filter(t=> selectedIds.includes(t.id));
+    const monthDays = Number(document.getElementById('consMonthDays').value)||31;
+    const piTotal = selectedPIs.reduce((s,t)=> s+calcTxnTotals(t).grandTotal, 0);
+    const calc = calcConsolidation(monthDays, consolidateVesselRows, piTotal);
+    const newVesselNames = consolidateVesselRows.map(v=>v.name.trim()).filter(n=> n && !(ORG.vessels||[]).includes(n));
+    if(newVesselNames.length){ ORG.vessels = (ORG.vessels||[]).concat(newVesselNames); await saveOrg(); }
+    const month = document.getElementById('consMonth').value;
+    const piNumbers = selectedPIs.map(p=>p.txnNo);
+    const party = PARTIES.find(p=>p.id===selectedPIs[0].partyId);
+
+    const gstItems = [
+      { id:uid(), description:'Technical Service Fee — Domestic (Indian Waters)', hsn:'', qty:1, rate:calc.totalDomesticTech, gstPct:18 },
+      { id:uid(), description:'Other Services — Domestic (Indian Waters)', hsn:'', qty:1, rate:calc.totalDomesticOther, gstPct:18 }
+    ];
+    const nonGstItems = [
+      { id:uid(), description:'Technical Service Fee — Export (International Waters)', hsn:'', qty:1, rate:calc.totalExportTech, gstPct:0 },
+      { id:uid(), description:'Other Services — Export (International Waters)', hsn:'', qty:1, rate:calc.exportOtherResidual, gstPct:0 }
+    ];
+    const commonNotes = `Consolidated from Proforma Invoice(s): ${piNumbers.join(', ')} — ${month}.`;
+
+    async function createInvoice(items, gstMode, label){
+      const rec = {
+        id: uid(), txnCategory:'INVOICE', txnDirection: selectedPIs[0].txnDirection||'Outgoing',
+        partyId: selectedPIs[0].partyId, partyName: party?party.partyName:selectedPIs[0].partyName,
+        txnDate: new Date().toISOString().slice(0,10), dueDate:'',
+        referenceType:'Ref Proforma Invoice No', reference: piNumbers.join(', '), subject: `${label} — ${month}`,
+        status:'Draft', gstMode, items,
+        poNumber:'', poDate:'', poTerms:'', panNumber:'', supplyDateTime:'', placeOfSupply:'', vehicleNo:'',
+        dnTransportMode:'', dnVehicleNo:'', dnPlaceOfDelivery:'', dnType:'', dnLinkedInvoice:'', dnSignedStatus:'', dnDeliveryDateTime:'',
+        fundReceivedAmount:'', fundReceivedDate:'', fundReceivedVia:'', linkedInvoice:'',
+        linkedProforma:'', linkedProformas: piNumbers,
+        terms:'', notes: commonNotes, revisionNo:0, revisionHistory:[]
+      };
+      rec.txnNo = nextTxnNo('INVOICE');
+      tagRecord(rec, true);
+      TRANSACTIONS.push(rec);
+      return rec;
+    }
+    const gstInvoice = await createInvoice(gstItems, 'Intra', 'GST Invoice (Domestic)');
+    const nonGstInvoice = await createInvoice(nonGstItems, 'None', 'Non-GST Invoice (Export)');
+    await saveOrg();
+
+    selectedPIs.forEach(pi=>{
+      pi.linkedInvoiceGST = gstInvoice.txnNo; pi.linkedInvoiceNonGST = nonGstInvoice.txnNo;
+      pi.status = 'Converted'; tagRecord(pi, false);
+    });
+    await saveTransactions();
+    closeModal(); toast(`Created ${gstInvoice.txnNo} (GST) and ${nonGstInvoice.txnNo} (Non-GST) from ${selectedIds.length} proforma(s).`); render();
+  };
 }
 function deleteTxn(id){
   const t = TRANSACTIONS.find(x=>x.id===id); if(!t) return;
@@ -2697,6 +2956,9 @@ function openTxnPrint(id){
     t.vehicleNo && ['VEHICLE NO.', t.vehicleNo, 'SUPPLY DATE/TIME', t.supplyDateTime],
     t.txnCategory==='DELIVERY_NOTE' && ['TRANSPORT MODE', t.dnTransportMode, 'PLACE OF DELIVERY', t.dnPlaceOfDelivery],
     t.txnCategory==='DELIVERY_NOTE' && ['DELIVERY VEHICLE', t.dnVehicleNo, 'SIGNED STATUS', t.dnSignedStatus],
+    t.txnCategory==='PROFORMA' && t.fundReceivedAmount && ['FUND RECEIVED', money2(Number(t.fundReceivedAmount)), 'RECEIVED DATE', t.fundReceivedDate],
+    t.txnCategory==='PROFORMA' && t.fundReceivedVia && ['RECEIVED VIA', t.fundReceivedVia, 'CONVERTED TO', t.linkedInvoice||'Not yet converted'],
+    t.linkedProforma && ['CONVERTED FROM PROFORMA', t.linkedProforma, '', ''],
   ].filter(Boolean);
   const html = `
     <div class="modal-head no-print"><h3>${esc(t.txnNo)}</h3><button class="modal-close" id="mClose">✕</button></div>
