@@ -1932,8 +1932,15 @@ async function driveEnsureSheet(){
   if(sheetId !== ORG.gdrive.sheetId){ ORG.gdrive.sheetId = sheetId; await saveOrgSilent(); }
   return sheetId;
 }
+/* Converts a 1-based column number to its spreadsheet letter (27 -> AA, etc.) */
+function colToLetter(n){
+  let s = '';
+  while(n > 0){ const rem = (n-1) % 26; s = String.fromCharCode(65+rem) + s; n = Math.floor((n-1)/26); }
+  return s;
+}
 async function driveWriteSheetTab(sheetId, tab, rows){
-  await driveFetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(tab)}!A1:Z${Math.max(rows.length,1)}?valueInputOption=RAW`,
+  const lastCol = colToLetter(Math.max(1, ...rows.map(r=>r.length)));
+  await driveFetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(tab)}!A1:${lastCol}${Math.max(rows.length,1)}?valueInputOption=RAW`,
     { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({values:rows}) });
 }
 /* Builds/updates the live Google Sheet from the current in-app data — one tab per data table.
