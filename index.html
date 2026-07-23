@@ -1331,7 +1331,7 @@ function openGeneratePayslip(){
       PAYSLIPS.push(record);
       const saved = await savePayslips();
       if(saved===false) throw new Error('Local save failed — browser storage may be full.');
-      closeModal(); toast('Payslip generated and saved.'); openPayslipView(record.id);
+      closeModal(); toast('Payslip generated and saved.'); render(); openPayslipView(record.id);
     }catch(err){
       btn.disabled = false; btn.textContent = 'Generate';
       toast('Could not save the payslip: '+(err.message||'unknown error')+' — nothing was recorded, please try again.', true);
