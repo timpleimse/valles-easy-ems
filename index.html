@@ -753,7 +753,13 @@ function openEmployeeForm(empId){
       <div class="section-label">Starting Salary Structure</div>
       <p class="hint" style="margin:-6px 0 10px;">You can revise this later from Settings &rarr; Salary Revision — every revision is kept on record for audit purposes.</p>
       ${salaryFieldsHtml({basic:0,hra:0,childrenEducation:0,otherAllowance:0,lta:0,reimbursement:0,taxRegime:'new',rentPaidAnnual:0,metroCity:true,declared80C:0,declared80D:0,otherExemptions:0})}
-      ` : `<div class="hint">Salary is managed separately under <b>Settings → Salary Revision</b>, so every change stays on the audit trail.</div>`}
+      ` : (()=>{ const cs = currentSalary(e); return `
+      <div class="section-label" style="display:flex;align-items:center;justify-content:space-between;">
+        <span>Salary &amp; Tax Regime</span><span class="pill ${regimePillClass(cs.taxRegime)}">${regimeLabel(cs.taxRegime)}</span>
+      </div>
+      <p class="hint" style="margin:-4px 0 10px;">Basic, HRA, and Tax Regime (including switching to Contractor / Old / New) are changed via Revise Salary, not here — every change stays on the audit trail. Close this form and use the button below to go there directly.</p>
+      <button type="button" class="btn secondary sm" id="jumpToRevise">↻ Revise Salary for ${esc(e.name)}</button>
+      `; })()}
 
       <div class="divider"></div>
       <div class="btn-row">
@@ -765,6 +771,8 @@ function openEmployeeForm(empId){
   document.getElementById('mClose').onclick = closeModal;
   document.getElementById('mCancel').onclick = closeModal;
   if(!isEdit) wireRegimeToggle(document.getElementById('empForm'));
+  const jumpBtn = document.getElementById('jumpToRevise');
+  if(jumpBtn) jumpBtn.onclick = ()=>{ closeModal(); openReviseSalary(empId); };
   document.getElementById('empForm').onsubmit = async (ev)=>{
     ev.preventDefault();
     if(isEdit){
