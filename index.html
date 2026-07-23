@@ -577,7 +577,7 @@ function openModal(html, wide){
   document.getElementById('overlay').classList.add('show');
 }
 function closeModal(){ document.getElementById('overlay').classList.remove('show'); document.getElementById('modalBox').innerHTML=''; }
-document.getElementById('overlay').addEventListener('click', (e)=>{ if(e.target.id==='overlay') closeModal(); });
+document.getElementById('overlay').addEventListener('click', (e)=>{ if(e.target.id==='overlay' && !reconcilePending) closeModal(); });
 
 /* ============================= RENDER ROUTER ============================= */
 function render(){
@@ -1575,7 +1575,7 @@ function viewComplianceRecord(empId, recId){
 /* Uses Google Identity Services (OAuth) + Drive API v3 + Sheets API v4 directly via fetch —
    no server needed, works fine from a static GitHub Pages site. Scope is drive.file, so the
    app can only see/edit the files and folders it creates itself, never your whole Drive. */
-let gisTokenClient = null, driveAccessToken = null, driveTokenExpiry = 0, driveLastError = null;
+let gisTokenClient = null, driveAccessToken = null, driveTokenExpiry = 0, driveLastError = null, reconcilePending = false;
 let driveSyncTimer = null, driveAutoInterval = null, driveBusy = false, driveReconnecting = false;
 
 function driveConnected(){ return !!(driveAccessToken && Date.now() < driveTokenExpiry); }
@@ -1596,7 +1596,7 @@ function initGis(){
       ORG.gdrive.connected = true; await saveOrg();
       toast('Google Drive connected.');
       ensureStaffName();
-      try{ await driveReconcileOnConnect(); await driveSyncNow(); }catch(e){}
+      try{ const waitingOnUser = await driveReconcileOnConnect(); if(!waitingOnUser) await driveSyncNow(); }catch(e){}
       startAutoSyncLoop();
       if(activeTab==='settings') renderSettings(document.getElementById('content'), document.getElementById('tabActions'));
     }
@@ -1713,24 +1713,28 @@ async function applyRestoredPayload(data){
 async function driveReconcileOnConnect(){
   if(!ORG.gdrive.folderId) await driveSetup();
   await driveEnsureDataFile();
-  if(!ORG.gdrive.fileId) return; // nothing in Drive yet — genuinely first-ever setup, push local as-is
+  if(!ORG.gdrive.fileId) return false; // nothing in Drive yet — genuinely first-ever setup, push local as-is
   let remote = null;
   try{
     const res = await driveFetch(`https://www.googleapis.com/drive/v3/files/${ORG.gdrive.fileId}?alt=media`);
     if(res.ok) remote = await res.json();
   }catch(e){}
-  if(!remote) return;
+  if(!remote) return false;
   const localCount = totalRecordCount({ employees:EMPLOYEES, payslips:PAYSLIPS, parties:PARTIES, documents:COMPANY_DOCS, transactions:TRANSACTIONS, expenses:EXPENSES });
   const remoteCount = totalRecordCount(remote);
   if(localCount===0 && remoteCount>0){
     await applyRestoredPayload(remote);
     toast(`Imported existing company data from Google Drive (${remoteCount} records) into this device.`);
+    return false;
   } else if(localCount>0 && remoteCount>0){
     showReconcileChoiceModal(remote, localCount, remoteCount);
+    return true; // blocking — caller must NOT auto-sync until the user picks an option
   }
   // localCount>0 && remoteCount===0, or both zero: nothing to reconcile — proceed normally.
+  return false;
 }
 function showReconcileChoiceModal(remotePayload, localCount, remoteCount){
+  reconcilePending = true;
   openModal(`
     <div class="modal-head"><h3>⚠️ Both This Device and Google Drive Have Data</h3></div>
     <p>This device has <b>${localCount}</b> record(s) that have never synced, and Google Drive already has <b>${remoteCount}</b> record(s) saved from elsewhere. Pick how to proceed — auto-merging isn't safe here, since it isn't clear which side is current.</p>
@@ -1740,14 +1744,35 @@ function showReconcileChoiceModal(remotePayload, localCount, remoteCount){
       <button class="btn secondary" id="rcCancel">Cancel — disconnect, so I can back this device up first</button>
     </div>
   `, true);
+  const btns = ['rcUseDrive','rcUseLocal','rcCancel'].map(id=>document.getElementById(id));
+  function lockButtons(activeId, label){
+    btns.forEach(b=>{ b.disabled = true; if(b.id===activeId) b.textContent = label; });
+  }
   document.getElementById('rcUseDrive').onclick = async ()=>{
-    await applyRestoredPayload(remotePayload); closeModal(); toast("Imported Google Drive's data. This device's unsynced data was discarded."); render();
+    lockButtons('rcUseDrive', 'Importing…');
+    try{
+      await applyRestoredPayload(remotePayload);
+      reconcilePending = false; closeModal();
+      toast("Imported Google Drive's data. This device's unsynced data was discarded.");
+      render();
+    }catch(e){ reconcilePending = false; toast('Import failed: '+e.message+' — try again or check your connection.', true); btns.forEach(b=> b.disabled=false); document.getElementById('rcUseDrive').textContent = "Use Google Drive's data — discard what's on this device"; }
   };
   document.getElementById('rcUseLocal').onclick = async ()=>{
-    closeModal(); toast("Keeping this device's data — pushing it to Google Drive now."); await driveSyncNow(); render();
+    lockButtons('rcUseLocal', 'Pushing…');
+    try{
+      reconcilePending = false; closeModal();
+      toast("Keeping this device's data — pushing it to Google Drive now.");
+      await driveSyncNow();
+      render();
+    }catch(e){ reconcilePending = false; toast('Push failed: '+e.message, true); }
   };
   document.getElementById('rcCancel').onclick = async ()=>{
-    await disconnectDrive(); closeModal(); toast('Disconnected. Use Backup → Download JSON to save this device\u2019s data before reconnecting.');
+    lockButtons('rcCancel', 'Disconnecting…');
+    try{
+      await disconnectDrive();
+      reconcilePending = false; closeModal();
+      toast('Disconnected. Use Backup → Download JSON to save this device\u2019s data before reconnecting.');
+    }catch(e){ reconcilePending = false; toast('Disconnect failed: '+e.message, true); btns.forEach(b=> b.disabled=false); }
   };
 }
 async function driveUploadJson(name, parentId, contentObj, existingFileId){
@@ -1777,7 +1802,7 @@ function startAutoSyncLoop(){
   driveAutoInterval = setInterval(()=>{ if(ORG.gdrive && ORG.gdrive.connected) driveSyncNow(); updateDriveStatusUI(); }, 20000);
 }
 async function driveSyncNow(){
-  if(!driveConnected() || driveBusy || !ORG.gdrive.connected) return;
+  if(!driveConnected() || driveBusy || !ORG.gdrive.connected || reconcilePending) return;
   driveBusy = true;
   try{
     if(!ORG.gdrive.folderId) await driveSetup();
@@ -1938,9 +1963,9 @@ async function driveExportSheet(silent){
     const txnRows = [['Txn No.','Category','Direction','Party','Date','Due Date','Status','Reference','Subject','Subtotal','GST Mode','Tax Amount','Grand Total','Revision No.']]
       .concat(TRANSACTIONS.map(t=>{ const tot = calcTxnTotals(t); return [t.txnNo,TXN_CATEGORIES[t.txnCategory]?TXN_CATEGORIES[t.txnCategory].label:t.txnCategory,t.txnDirection,t.partyName,t.txnDate,t.dueDate,t.status,(t.referenceType||'')+' '+(t.reference||''),t.subject,tot.subtotal,t.gstMode,tot.taxAmount,tot.grandTotal,t.revisionNo||0]; }));
 
-    const expRows = [['Voucher No.','Vendor','Bill No.','Bill Date','Due Date','Category','Currency','Bill Amount (INR)','GST Mode','RCM','GST Amount','TDS Section','TDS Rate','TDS Amount','Net Payable','Paid','Balance','Status','Ledger Account','GSTR-2B Claim Month','Bill Attached','Receipt Attached','Tally Voucher No.','Tally Voucher Date']]
+    const expRows = [['Voucher No.','Vendor','Bill No.','Bill Date','Due Date','Category','Currency','Bill Amount (INR)','GST Mode','RCM','GST Amount','TDS Section','TDS Rate','TDS Amount','Net Payable','Paid','Balance','Status','Ledger Account','GSTR-2B Claim Month','Bill Attached','Receipt Attached','Payment Mode','Payment Reference','Date of Payment','Tally Voucher No.','Tally Voucher Date']]
       .concat(EXPENSES.map(e=>{ const tot = calcExpenseTotals(e); const sec = TDS_SECTION_BY_ID[e.tdsSectionId]; const ledger = (ORG.chartOfAccounts||[]).find(a=>a.id===e.ledgerAccountId);
-        return [e.voucherNo,e.vendorName,e.billNo,e.billDate,e.dueDate,e.category,e.currency||'INR',tot.amtINR,e.rcmApplicable?'RCM':e.gstMode,e.rcmApplicable?(e.rcmRate+'%'):'',tot.gstTotal,sec?sec.oldCode:'',e.tdsApplicable?e.tdsRate:'',tot.tdsAmount,tot.netPayable,e.paidAmount,tot.balance,tot.payStatus,ledger?ledger.code+' '+ledger.name:'',e.gstr2bClaimMonth||'',(e.billAttachments||e.attachments||[]).length?'Yes':'No',(e.receiptAttachments||[]).length?'Yes':'No',e.tallyVoucherNo||'',e.tallyVoucherDate||'']; }));
+        return [e.voucherNo,e.vendorName,e.billNo,e.billDate,e.dueDate,e.category,e.currency||'INR',tot.amtINR,e.rcmApplicable?'RCM':e.gstMode,e.rcmApplicable?(e.rcmRate+'%'):'',tot.gstTotal,sec?sec.oldCode:'',e.tdsApplicable?e.tdsRate:'',tot.tdsAmount,tot.netPayable,e.paidAmount,tot.balance,tot.payStatus,ledger?ledger.code+' '+ledger.name:'',e.gstr2bClaimMonth||'',(e.billAttachments||e.attachments||[]).length?'Yes':'No',(e.receiptAttachments||[]).length?'Yes':'No',e.paymentMode||'',e.paymentRef||'',e.paymentDate||'',e.tallyVoucherNo||'',e.tallyVoucherDate||'']; }));
 
     await driveWriteSheetTab(sheetId, 'Employees', empRows);
     await driveWriteSheetTab(sheetId, 'Salary History', salRows);
@@ -2883,7 +2908,7 @@ function openExpenseForm(expId){
     description:'', category:'Materials', billAmount:0, currency:'INR', exchRate:1, gstMode:'Intra', gstPct:18,
     rcmApplicable:false, rcmRate:18, rcmSupplyType:'intra', gstr2bClaimMonth:'',
     tdsApplicable:false, tdsSectionId:'', tdsRate:0, ledgerAccountId:'',
-    paidAmount:0, paidFrom:'', notes:'', tallyVoucherNo:'', tallyVoucherDate:''
+    paidAmount:0, paidFrom:'', paymentMode:'', paymentRef:'', paymentDate:'', notes:'', tallyVoucherNo:'', tallyVoucherDate:''
   };
   if(isEdit && expIsLocked(e)){ toast('This bill is fully paid and locked. Enable editing in Settings → Bills & Expenses if this needs correcting.', true); return; }
   const baseRev = Number(e._rev)||0;
@@ -2938,8 +2963,17 @@ function openExpenseForm(expId){
       <div class="section-label" style="margin-top:14px;">Payment</div>
       <div class="grid cols-3">
         <div class="field"><label>Amount Paid So Far (₹)</label><input type="number" min="0" step="0.01" name="paidAmount" id="expPaidAmount" value="${e.paidAmount}"></div>
-        <div class="field"><label>Paid From (bank / cash)</label><input type="text" name="paidFrom" value="${esc(e.paidFrom)}"></div>
+        <div class="field"><label>Payment Mode</label><select name="paymentMode" id="expPaymentMode">
+          <option value="">— Not yet paid —</option>
+          <option value="Bank Transfer" ${e.paymentMode==='Bank Transfer'?'selected':''}>Bank Transfer</option>
+          <option value="Cheque" ${e.paymentMode==='Cheque'?'selected':''}>Cheque</option>
+          <option value="Cash" ${e.paymentMode==='Cash'?'selected':''}>Cash</option>
+          <option value="Card" ${e.paymentMode==='Card'?'selected':''}>Card</option>
+          <option value="UPI" ${e.paymentMode==='UPI'?'selected':''}>UPI</option>
+          <option value="Other" ${e.paymentMode==='Other'?'selected':''}>Other</option>
+        </select></div>
       </div>
+      <div id="expPaymentDetailFields"></div>
       <div class="field"><label>Notes</label><textarea name="notes" rows="2">${esc(e.notes)}</textarea></div>
       <div class="section-label" style="display:flex;align-items:center;justify-content:space-between;">
         <span>📋 Tally Voucher</span>${e.tallyVoucherNo?'<span class="pill good">Posted</span>':'<span class="pill warn">Pending</span>'}
@@ -3019,6 +3053,31 @@ function openExpenseForm(expId){
   ['expBillAmount','expExchRate','expGstMode','expGstPct','expRcmRate','expRcmSupply','expTdsRate','expPaidAmount'].forEach(id=> document.getElementById(id).addEventListener('input', drawTotalsPreview));
   drawTotalsPreview();
 
+  /* Bank details shown here are read from Settings → Company Details — the person doesn't
+     retype them for every bill, and if they're blank, this says so plainly rather than
+     showing an empty box that looks broken. */
+  function paymentDetailFieldsFor(mode){
+    if(!mode) return '';
+    const hasBank = ORG.bankName || ORG.bankAccNo;
+    const bankBlock = mode==='Bank Transfer' ? `
+      <div class="field" style="background:var(--bg);border:1px solid var(--rule);border-radius:8px;padding:10px 12px;margin-bottom:10px;">
+        <label style="font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-soft);">Paid From Company Account</label>
+        ${hasBank ? `<div style="margin-top:4px;">${esc(ORG.bankName||'—')} · A/c ${esc(ORG.bankAccNo||'—')} · IFSC ${esc(ORG.bankIFSC||'—')}${ORG.bankBranch?(' · '+esc(ORG.bankBranch)):''}</div>`
+                  : `<div style="margin-top:4px;color:var(--bad);">No company bank account on file — add one in Settings → Company Details.</div>`}
+      </div>` : '';
+    const refLabel = mode==='Cheque' ? 'Cheque Number' : (mode==='Bank Transfer'||mode==='UPI') ? 'Transaction Reference / UTR' : mode==='Card' ? 'Card Transaction Reference' : 'Reference (optional)';
+    return `${bankBlock}
+      <div class="grid cols-2">
+        <div class="field"><label>${refLabel}</label><input type="text" name="paymentRef" value="${esc(e.paymentRef)}"></div>
+        <div class="field"><label>Date of Payment</label><input type="date" name="paymentDate" value="${esc(e.paymentDate)}"></div>
+      </div>`;
+  }
+  function drawPaymentFields(){
+    document.getElementById('expPaymentDetailFields').innerHTML = paymentDetailFieldsFor(document.getElementById('expPaymentMode').value);
+  }
+  document.getElementById('expPaymentMode').addEventListener('change', drawPaymentFields);
+  drawPaymentFields();
+
   const tallyDropZone = document.getElementById('tallyDropZone'); const tallyFileInput = document.getElementById('tallyFileInput');
   tallyDropZone.onclick = ()=> tallyFileInput.click();
   tallyDropZone.ondragover = (ev)=> ev.preventDefault();
@@ -3097,7 +3156,8 @@ async function submitExpenseForm(ev, isEdit, e){
     gstr2bClaimMonth: fd.get('gstr2bClaimMonth')||'',
     tdsApplicable: fd.get('tdsApplicable')==='on', tdsSectionId: fd.get('tdsSectionId')||'', tdsRate: Number(fd.get('tdsRate'))||0,
     ledgerAccountId: fd.get('ledgerAccountId')||'',
-    paidAmount: Number(fd.get('paidAmount'))||0, paidFrom: fd.get('paidFrom').trim(), notes: fd.get('notes').trim(),
+    paidAmount: Number(fd.get('paidAmount'))||0, paidFrom: e.paidFrom||'', paymentMode: fd.get('paymentMode')||'',
+    paymentRef: (fd.get('paymentRef')||'').trim(), paymentDate: fd.get('paymentDate')||'', notes: fd.get('notes').trim(),
     tallyVoucherNo: fd.get('tallyVoucherNo').trim(), tallyVoucherDate: fd.get('tallyVoucherDate')||'', tallyAttachment: pendingTallyFile,
     billAttachments: pendingBillFiles, receiptAttachments: pendingReceiptFiles
   };
