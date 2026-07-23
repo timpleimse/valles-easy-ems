@@ -498,36 +498,36 @@ async function loadAll(){
   EXPENSES = await getJSON('expenses', []);
   refreshBrand();
 }
-async function saveOrg(){ await setJSON('org-profile', ORG); }
+async function saveOrg(){ return await setJSON('org-profile', ORG); }
 async function saveTransactions(){
   const remote = await pullRemotePayload();
   TRANSACTIONS = mergeCollection('transactions', TRANSACTIONS, remote && remote.transactions, remote && remote.tombstones && remote.tombstones.transactions);
-  await setJSON('transactions', TRANSACTIONS);
+  return await setJSON('transactions', TRANSACTIONS);
 }
 async function saveExpenses(){
   const remote = await pullRemotePayload();
   EXPENSES = mergeCollection('expenses', EXPENSES, remote && remote.expenses, remote && remote.tombstones && remote.tombstones.expenses);
-  await setJSON('expenses', EXPENSES);
+  return await setJSON('expenses', EXPENSES);
 }
 async function saveParties(){
   const remote = await pullRemotePayload();
   PARTIES = mergeCollection('parties', PARTIES, remote && remote.parties, remote && remote.tombstones && remote.tombstones.parties);
-  await setJSON('parties', PARTIES);
+  return await setJSON('parties', PARTIES);
 }
 async function saveCompanyDocs(){
   const remote = await pullRemotePayload();
   COMPANY_DOCS = mergeCollection('documents', COMPANY_DOCS, remote && remote.documents, remote && remote.tombstones && remote.tombstones.documents);
-  await setJSON('documents', COMPANY_DOCS);
+  return await setJSON('documents', COMPANY_DOCS);
 }
 async function saveEmployees(){
   const remote = await pullRemotePayload();
   EMPLOYEES = mergeCollection('employees', EMPLOYEES, remote && remote.employees, remote && remote.tombstones && remote.tombstones.employees);
-  await setJSON('employees', EMPLOYEES);
+  return await setJSON('employees', EMPLOYEES);
 }
 async function savePayslips(){
   const remote = await pullRemotePayload();
   PAYSLIPS = mergeCollection('payslips', PAYSLIPS, remote && remote.payslips, remote && remote.tombstones && remote.tombstones.payslips);
-  await setJSON('payslips', PAYSLIPS);
+  return await setJSON('payslips', PAYSLIPS);
 }
 async function saveCompliance(empId){
   const remote = await pullRemotePayload();
@@ -535,7 +535,7 @@ async function saveCompliance(empId){
   const remoteArr = remote && remote.compliance ? remote.compliance[empId] : null;
   const remoteTomb = remote && remote.tombstones ? remote.tombstones[tombKind] : null;
   COMPLIANCE[empId] = mergeCollection(tombKind, COMPLIANCE[empId]||[], remoteArr, remoteTomb);
-  await setJSON('compliance:'+empId, COMPLIANCE[empId]||[]);
+  return await setJSON('compliance:'+empId, COMPLIANCE[empId]||[]);
 }
 async function loadCompliance(empId){
   if(COMPLIANCE[empId]) return COMPLIANCE[empId];
@@ -1305,27 +1305,37 @@ function openGeneratePayslip(){
   document.getElementById('genBonus').addEventListener('input', preview);
   preview();
   document.getElementById('genConfirm').onclick = async ()=>{
-    const emp = EMPLOYEES.find(x=>x.id===document.getElementById('genEmp').value);
-    const period = document.getElementById('genPeriod').value;
-    const bonus = Number(document.getElementById('genBonus').value)||0;
-    const r = computePayslip(emp, period, bonus);
-    const record = {
-      id:uid(), empId:emp.id, empName:emp.name, empCode:emp.empCode, designation:emp.designation,
-      department:emp.department, grade:emp.grade, location:emp.location, division:emp.division,
-      pfNumber:emp.pfNumber, uan:emp.uan,
-      dob:emp.dob, doj:emp.doj, pan:emp.pan,
-      bankAccNo:emp.bankAccNo, bankName:emp.bankName, ifsc:emp.ifsc, period,
-      basic:r.salarySnapshot.basic, hra:r.salarySnapshot.hra, childrenEducation:r.salarySnapshot.childrenEducation,
-      otherAllowance:r.salarySnapshot.otherAllowance, lta:r.salarySnapshot.lta,
-      gross:r.gross, bonus:r.bonus, pfEmployee:r.pfEmployee, pfEmployer:r.pfEmployer, esi:r.esi, pt:r.pt, tds:r.tds,
-      regularTds:r.regularTds, bonusTaxImpact:r.bonusTaxImpact,
-      totalDeductions:r.totalDeductions, netPay:r.netPay, reimbursement:r.reimbursement, ctc:r.ctc,
-      taxRegime:r.salarySnapshot.taxRegime, taxableAnnual:r.taxableAnnual,
-      generatedAt: new Date().toISOString()
-    };
-    tagRecord(record, true);
-    PAYSLIPS.push(record); await savePayslips();
-    closeModal(); toast('Payslip generated.'); openPayslipView(record.id);
+    const btn = document.getElementById('genConfirm');
+    btn.disabled = true; btn.textContent = 'Generating…';
+    try{
+      const emp = EMPLOYEES.find(x=>x.id===document.getElementById('genEmp').value);
+      if(!emp) throw new Error('No employee selected.');
+      const period = document.getElementById('genPeriod').value;
+      const bonus = Number(document.getElementById('genBonus').value)||0;
+      const r = computePayslip(emp, period, bonus);
+      const record = {
+        id:uid(), empId:emp.id, empName:emp.name, empCode:emp.empCode, designation:emp.designation,
+        department:emp.department, grade:emp.grade, location:emp.location, division:emp.division,
+        pfNumber:emp.pfNumber, uan:emp.uan,
+        dob:emp.dob, doj:emp.doj, pan:emp.pan,
+        bankAccNo:emp.bankAccNo, bankName:emp.bankName, ifsc:emp.ifsc, period,
+        basic:r.salarySnapshot.basic, hra:r.salarySnapshot.hra, childrenEducation:r.salarySnapshot.childrenEducation,
+        otherAllowance:r.salarySnapshot.otherAllowance, lta:r.salarySnapshot.lta,
+        gross:r.gross, bonus:r.bonus, pfEmployee:r.pfEmployee, pfEmployer:r.pfEmployer, esi:r.esi, pt:r.pt, tds:r.tds,
+        regularTds:r.regularTds, bonusTaxImpact:r.bonusTaxImpact,
+        totalDeductions:r.totalDeductions, netPay:r.netPay, reimbursement:r.reimbursement, ctc:r.ctc,
+        taxRegime:r.salarySnapshot.taxRegime, taxableAnnual:r.taxableAnnual,
+        generatedAt: new Date().toISOString()
+      };
+      tagRecord(record, true);
+      PAYSLIPS.push(record);
+      const saved = await savePayslips();
+      if(saved===false) throw new Error('Local save failed — browser storage may be full.');
+      closeModal(); toast('Payslip generated and saved.'); openPayslipView(record.id);
+    }catch(err){
+      btn.disabled = false; btn.textContent = 'Generate';
+      toast('Could not save the payslip: '+(err.message||'unknown error')+' — nothing was recorded, please try again.', true);
+    }
   };
 }
 
@@ -3241,10 +3251,10 @@ function openExpenseForm(expId){
       </div>
       <div class="grid cols-3">
         <div class="field" id="expVendorWrap"><label id="expVendorLabel">Vendor</label><select name="vendorId"><option value="">— Select Vendor —</option>${PARTIES.map(p=>`<option value="${p.id}" ${e.vendorId===p.id?'selected':''}>${esc(p.partyName)}</option>`).join('')}</select></div>
-        <div class="field" id="expEmployeeWrap" style="display:none;"><label>Staff Member</label><select name="employeeId">
+        <div class="field" id="expEmployeeWrap" style="display:none;"><label>Staff Member</label><select name="employeeId" id="expEmployeeSel">
           <option value="">— Select Staff —</option>${activeStaff.map(s=>`<option value="${s.id}" ${e.employeeId===s.id?'selected':''}>${esc(s.name)} (${esc(s.empCode)})</option>`).join('')}
         </select></div>
-        <div class="field" id="expSalaryMonthWrap" style="display:none;"><label>Salary Month</label><input type="month" name="salaryMonth" value="${esc(e.salaryMonth)}"></div>
+        <div class="field" id="expSalaryMonthWrap" style="display:none;"><label>Salary Month</label><input type="month" name="salaryMonth" id="expSalaryMonth" value="${esc(e.salaryMonth)}"></div>
         <div class="field" id="expStatutoryTypeWrap" style="display:none;"><label>Statutory Type</label><select name="statutoryType">
           <option value="">— Select —</option>
           <option value="PF" ${e.statutoryType==='PF'?'selected':''}>Provident Fund (PF)</option>
@@ -3270,6 +3280,7 @@ function openExpenseForm(expId){
       <div class="grid cols-3" id="expSimpleAmountRow" style="display:none;">
         <div class="field"><label id="expStatutoryAmountLabel">Amount</label><input type="number" min="0" step="0.01" name="statutoryAmount" id="expStatutoryAmount" value="${e.statutoryAmount}"></div>
       </div>
+      <div id="expSalaryAutofillBanner"></div>
       <div id="expInterBankWrap" style="display:none;background:#ECFEFF;border:1px solid #A5F3FC;border-radius:8px;padding:10px 12px;margin-bottom:12px;">
         <label style="font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#0E7490;">🔁 Inter-Bank Transfer Details</label>
         <div class="grid cols-3" style="margin-top:6px;">
@@ -3400,6 +3411,42 @@ function openExpenseForm(expId){
   const billTypeSel = document.getElementById('expBillType');
   if(!isEdit) billTypeSel.addEventListener('change', applyBillType);
   applyBillType();
+
+  /* When a Salary/Wages bill has both employee and month selected, pull the actual figures
+     from that employee's generated payslip for that month, if one exists — Gross becomes
+     the bill's Amount, and TDS/PF/PT/ESIC are pre-filled so the expense reconciles exactly
+     to what the payslip already paid out, instead of being retyped and risking a mismatch.
+     If no payslip exists yet for that employee/month, this says so plainly and leaves the
+     fields for manual entry rather than guessing. */
+  function autofillFromPayslip(){
+    if(currentBillType()!=='SALARY') return;
+    const empId = document.getElementById('expEmployeeSel').value;
+    const month = document.getElementById('expSalaryMonth').value;
+    const banner = document.getElementById('expSalaryAutofillBanner');
+    if(!empId || !month){ banner.innerHTML = ''; return; }
+    const payslip = PAYSLIPS.find(p=> p.empId===empId && p.period===month);
+    if(!payslip){
+      banner.innerHTML = `<div class="hint" style="color:var(--bad);margin:-6px 0 10px;">⚠ No payslip found for this employee in ${esc(month)} — enter the amount and deductions manually, or generate the payslip first for it to auto-fill here.</div>`;
+      return;
+    }
+    document.getElementById('expStatutoryAmount').value = payslip.gross;
+    document.getElementById('expTdsChk').checked = payslip.tds>0;
+    document.getElementById('expTdsFields').style.display = payslip.tds>0 ? 'grid' : 'none';
+    if(payslip.tds>0){
+      document.getElementById('expTdsRate').value = (payslip.tds/payslip.gross*100).toFixed(4);
+    }
+    document.getElementById('expDeductChk').checked = true;
+    document.getElementById('expDeductFields').style.display = 'grid';
+    document.getElementById('expPF').value = payslip.pfEmployee||0;
+    document.getElementById('expPT').value = payslip.pt||0;
+    document.getElementById('expESIC').value = payslip.esi||0;
+    document.getElementById('expOtherDed').value = 0;
+    banner.innerHTML = `<div class="hint" style="color:var(--good);margin:-6px 0 10px;">✓ Auto-filled from the ${esc(month)} payslip — Gross ${money2(payslip.gross)}, Net Pay ${money2(payslip.netPay)}. Adjust any figure below before saving if needed.</div>`;
+    drawTotalsPreview();
+  }
+  document.getElementById('expEmployeeSel').addEventListener('change', autofillFromPayslip);
+  document.getElementById('expSalaryMonth').addEventListener('change', autofillFromPayslip);
+  if(billTypeSel.value==='SALARY') autofillFromPayslip();
 
   function readForm(){
     const bt = currentBillType();
