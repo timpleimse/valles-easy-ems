@@ -316,6 +316,10 @@ const DEFAULT_ORG = {
   cin: "", pan: "", tan: "", gstin: "", logo: "",
   bankName: "", bankAccNo: "", bankIFSC: "", bankBranch: "",
   ptSlabs: [ {min:0, max:15000, amount:0}, {min:15001, max:20000, amount:150}, {min:20001, max:1000000000, amount:200} ],
+  /* Many states cap total annual Professional Tax at a fixed amount, made up with a larger
+     deduction in February — e.g. Maharashtra: ₹200 × 11 months + ₹300 in Feb = ₹2,500/year
+     exactly. Set to 0 to disable the February top-up for states that don't do this. */
+  ptAnnualCap: 2500,
   applyPfCeiling: false, pfCeiling: 15000,
   /* CTC structuring policy: given ONE CTC number, this is how the full monthly breakdown
      is derived. See "Revise by CTC" in Salary Revision. Editable in Settings. */
@@ -465,6 +469,7 @@ function backfillOrgDefaults(){
   if(ORG.allowFinalisedExpenseEdit===undefined) ORG.allowFinalisedExpenseEdit = false;
   if(!ORG.chartOfAccounts) ORG.chartOfAccounts = JSON.parse(JSON.stringify(DEFAULT_ORG.chartOfAccounts));
   if(!ORG.vessels) ORG.vessels = [];
+  if(ORG.ptAnnualCap===undefined) ORG.ptAnnualCap = 2500;
   if(ORG.allowFinalisedTxnEdit===undefined) ORG.allowFinalisedTxnEdit = false;
   if(ORG.gstin===undefined) ORG.gstin = '';
   /* Add new org-profile fields here going forward, not just in DEFAULT_ORG — this function
@@ -600,6 +605,8 @@ function render(){
 }
 
 /* ============================= SALARY HISTORY HELPERS ============================= */
+function regimeLabel(taxRegime){ return taxRegime==='old' ? 'Old' : taxRegime==='contractor' ? 'Contractor' : 'New'; }
+function regimePillClass(taxRegime){ return taxRegime==='old' ? 'bad' : taxRegime==='contractor' ? 'warn' : 'good'; }
 function currentSalary(emp){ return latestSalaryFor(emp, '9999-12'); }
 function latestSalaryFor(emp, period){
   const hist = (emp.salaryHistory||[]).slice().sort((a,b)=> a.effectiveFrom.localeCompare(b.effectiveFrom));
@@ -618,6 +625,8 @@ function renderDashboard(c, actions){
   let docsCount = 0; Object.values(COMPLIANCE).forEach(arr=> arr.forEach(r=> docsCount += (r.files||[]).length));
   const netThisMonth = PAYSLIPS.filter(p=>p.period===thisMonth).reduce((s,p)=>s+p.netPay,0);
   const oldRegimeCount = EMPLOYEES.filter(e=> currentSalary(e) && currentSalary(e).taxRegime==='old').length;
+  const contractorCount = EMPLOYEES.filter(e=> currentSalary(e) && currentSalary(e).taxRegime==='contractor').length;
+  const newRegimeCount = totalEmp - oldRegimeCount - contractorCount;
   const lastEdit = lastActivity();
 
   c.innerHTML = `
@@ -631,8 +640,8 @@ function renderDashboard(c, actions){
     <div class="stat-row">
       <div class="stat" style="background:var(--g-red);"><div class="n">${totalPayslips}</div><div class="l"><span class="ic">📚</span>Total Payslips Issued</div></div>
       <div class="stat" style="background:var(--g-amber);"><div class="n">${oldRegimeCount}</div><div class="l"><span class="ic">📑</span>On Old Tax Regime</div></div>
-      <div class="stat" style="background:var(--g-teal);"><div class="n">${totalEmp-oldRegimeCount}</div><div class="l"><span class="ic">📗</span>On New Tax Regime</div></div>
-      <div class="stat" style="background:var(--g-pink);"><div class="n">${Object.keys(COMPLIANCE).length}</div><div class="l"><span class="ic">🗂️</span>Employees with Filings</div></div>
+      <div class="stat" style="background:var(--g-teal);"><div class="n">${newRegimeCount}</div><div class="l"><span class="ic">📗</span>On New Tax Regime</div></div>
+      <div class="stat" style="background:var(--g-pink);"><div class="n">${contractorCount}</div><div class="l"><span class="ic">📝</span>Contractor (Flat TDS)</div></div>
     </div>
     <div class="grid cols-2">
       <div class="card">
@@ -672,7 +681,7 @@ function renderEmployees(c, actions){
           <td>${esc(e.name)}</td>
           <td>${esc(e.designation||'—')}</td>
           <td>${esc(e.department||'—')}</td>
-          <td><span class="pill ${s.taxRegime==='old'?'bad':'good'}">${s.taxRegime==='old'?'Old':'New'}</span></td>
+          <td><span class="pill ${regimePillClass(s.taxRegime)}">${regimeLabel(s.taxRegime)}</span></td>
           <td class="num-cell">${money(gross)}</td>
           <td><div class="btn-row">
             <button class="btn secondary sm" data-view="${e.id}">View</button>
@@ -851,8 +860,9 @@ function regimeFieldsHtml(s){
   return `
     <div class="grid cols-4">
       <div class="field"><label>Tax Regime</label><select name="taxRegime" class="regimeSel">
-        <option value="new" ${s.taxRegime!=='old'?'selected':''}>New Regime</option>
+        <option value="new" ${s.taxRegime!=='old'&&s.taxRegime!=='contractor'?'selected':''}>New Regime</option>
         <option value="old" ${s.taxRegime==='old'?'selected':''}>Old Regime</option>
+        <option value="contractor" ${s.taxRegime==='contractor'?'selected':''}>Contractor (Flat TDS, u/s 194C)</option>
       </select></div>
     </div>
     <div class="oldRegimeBlock" style="display:${s.taxRegime==='old'?'grid':'none'};" data-oldblock>
@@ -868,19 +878,33 @@ function regimeFieldsHtml(s){
       </div>
       <div class="grid cols-4"><div class="field"><label>Other Exemptions</label><input type="number" min="0" step="0.01" name="otherExemptions" value="${s.otherExemptions||0}"></div></div>
     </div>
+    <div class="contractorBlock" style="display:${s.taxRegime==='contractor'?'grid':'none'};background:#FFF7ED;border:1px solid #FDBA74;border-radius:8px;padding:10px 12px;" data-contractorblock>
+      <div class="section-label" style="margin-top:0;">Contractor TDS (Section 194C — flat rate, not slab-based)</div>
+      <p class="hint" style="margin:-4px 0 8px;">No standard deduction, HRA exemption, 80C/80D, or income slabs apply here — TDS is simply this % of gross pay each month, same as a contractor invoice. PF and ESI default off since 194C payments aren't "wages" for those purposes — turn on only if this specific person is still statutorily covered.</p>
+      <div class="grid cols-4">
+        <div class="field"><label>TDS Rate % (1% Individual/HUF, 2% Others)</label><input type="number" min="0" step="0.01" name="contractorTdsRate" value="${s.contractorTdsRate!=null?s.contractorTdsRate:1}"></div>
+        <div class="field" style="display:flex;align-items:end;"><label class="checkline"><input type="checkbox" name="contractorPfApplicable" ${s.contractorPfApplicable?'checked':''}> PF still applicable</label></div>
+        <div class="field" style="display:flex;align-items:end;"><label class="checkline"><input type="checkbox" name="contractorEsiApplicable" ${s.contractorEsiApplicable?'checked':''}> ESI still applicable <span style="font-weight:400;color:var(--muted);">(only actually deducted if gross ≤ ₹21,000)</span></label></div>
+      </div>
+    </div>
   `;
 }
 function wireRegimeToggle(scope){
-  const sel = scope.querySelector('.regimeSel'); const block = scope.querySelector('[data-oldblock]');
+  const sel = scope.querySelector('.regimeSel'); const block = scope.querySelector('[data-oldblock]'); const cblock = scope.querySelector('[data-contractorblock]');
   if(!sel||!block) return;
-  sel.addEventListener('change', ()=>{ block.style.display = sel.value==='old' ? 'grid' : 'none'; });
+  sel.addEventListener('change', ()=>{
+    block.style.display = sel.value==='old' ? 'grid' : 'none';
+    if(cblock) cblock.style.display = sel.value==='contractor' ? 'grid' : 'none';
+  });
 }
 function readSalaryFields(fd){
   return {
     basic:Number(fd.get('basic'))||0, hra:Number(fd.get('hra'))||0, childrenEducation:Number(fd.get('childrenEducation'))||0,
     otherAllowance:Number(fd.get('otherAllowance'))||0, lta:Number(fd.get('lta'))||0, reimbursement:Number(fd.get('reimbursement'))||0,
     taxRegime: fd.get('taxRegime')||'new', rentPaidAnnual:Number(fd.get('rentPaidAnnual'))||0, metroCity: fd.get('metroCity')==='true',
-    declared80C:Number(fd.get('declared80C'))||0, declared80D:Number(fd.get('declared80D'))||0, otherExemptions:Number(fd.get('otherExemptions'))||0
+    declared80C:Number(fd.get('declared80C'))||0, declared80D:Number(fd.get('declared80D'))||0, otherExemptions:Number(fd.get('otherExemptions'))||0,
+    contractorTdsRate: fd.get('contractorTdsRate')!=null ? (Number(fd.get('contractorTdsRate'))||0) : 1,
+    contractorPfApplicable: fd.get('contractorPfApplicable')==='on', contractorEsiApplicable: fd.get('contractorEsiApplicable')==='on'
   };
 }
 
@@ -918,7 +942,7 @@ async function viewEmployee(empId){
       <div><label>PAN</label><div>${esc(e.pan||'—')}</div></div>
       <div><label>UAN / PF No.</label><div>${esc(e.uan||'—')} / ${esc(e.pfNumber||'—')}</div></div>
       <div><label>Bank</label><div>${esc(e.bankName||'—')} ${e.bankAccNo?('· '+esc(e.bankAccNo)):''}</div></div>
-      <div><label>Tax Regime</label><div><span class="pill ${s.taxRegime==='old'?'bad':'good'}">${s.taxRegime==='old'?'Old Regime':'New Regime'}</span></div></div>
+      <div><label>Tax Regime</label><div><span class="pill ${regimePillClass(s.taxRegime)}">${regimeLabel(s.taxRegime)} Regime</span></div></div>
       <div><label>Gross Monthly</label><div><b>${money(gross)}</b></div></div>
     </div>
 
@@ -927,7 +951,7 @@ async function viewEmployee(empId){
     <table><thead><tr><th>Effective From</th><th>Basic</th><th>HRA</th><th>Gross</th><th>Regime</th><th>Revised</th><th>Reason</th></tr></thead><tbody>
       ${hist.map(h=>`<tr>
         <td>${esc(h.effectiveFrom)}</td><td class="num-cell">${money(h.basic)}</td><td class="num-cell">${money(h.hra)}</td>
-        <td class="num-cell">${money(grossOf(h))}</td><td>${h.taxRegime==='old'?'Old':'New'}</td>
+        <td class="num-cell">${money(grossOf(h))}</td><td>${regimeLabel(h.taxRegime)}</td>
         <td>${new Date(h.revisedAt).toLocaleDateString('en-IN')}</td><td>${esc(h.reason||'—')}</td>
       </tr>`).join('')}
     </tbody></table>
@@ -1069,7 +1093,29 @@ async function submitReviseSalary(ev, empId, mode){
 }
 
 /* ============================= TAX / STATUTORY ENGINE ============================= */
-function ptFor(gross){ const slab = (ORG.ptSlabs||[]).find(s => gross>=s.min && gross<=s.max); return slab ? slab.amount : 0; }
+/* period is 'YYYY-MM'. If an annual PT cap is configured (e.g. Maharashtra's ₹2,500), the
+   normal monthly slab amount is topped up in February so the year totals exactly the cap —
+   the standard 200×11+300=2500 pattern — instead of just multiplying the monthly slab by 12. */
+function ptFor(gross, period){
+  const slab = (ORG.ptSlabs||[]).find(s => gross>=s.min && gross<=s.max);
+  let amt = slab ? slab.amount : 0;
+  const cap = Number(ORG.ptAnnualCap)||0;
+  if(cap>0 && amt>0 && period){
+    const month = Number(String(period).slice(5,7));
+    if(month===2) amt = Math.max(amt, cap - amt*11);
+  }
+  return amt;
+}
+/* The actual annual Professional Tax figure to deduct from Old Regime taxable income (u/s
+   16(iii) — PT actually paid is deductible from salary income, separate from 80C/80D). If an
+   annual cap applies and PT is payable at all, the year always nets to exactly that cap by
+   construction of the February top-up rule; otherwise it's just 12× the flat monthly slab. */
+function ptAnnualForTaxDeduction(gross){
+  const monthly = ptFor(gross);
+  const cap = Number(ORG.ptAnnualCap)||0;
+  if(cap>0 && monthly>0) return cap;
+  return monthly*12;
+}
 
 function surchargeRateFor(taxableAnnual, tiers){
   let rate = 0;
@@ -1107,7 +1153,8 @@ function annualTaxFor(s, grossAnnual){
   if(s.taxRegime==='old'){
     const hraEx = hraExemptionAnnual(s);
     const cap80C = Math.min(s.declared80C||0, 150000);
-    taxableAnnual = Math.max(0, grossAnnual - (ORG.taxOld.stdDeduction||50000) - hraEx - cap80C - (s.declared80D||0) - (s.otherExemptions||0));
+    const ptAnnual = ptAnnualForTaxDeduction(grossOf(s));
+    taxableAnnual = Math.max(0, grossAnnual - (ORG.taxOld.stdDeduction||50000) - hraEx - cap80C - (s.declared80D||0) - (s.otherExemptions||0) - ptAnnual);
     total = oldRegimeAnnualTax(taxableAnnual).total;
   } else {
     taxableAnnual = Math.max(0, grossAnnual - (ORG.taxNew.stdDeduction||75000));
@@ -1129,22 +1176,35 @@ function computePayslip(emp, period, bonus){
   bonus = Number(bonus)||0;
   const s = latestSalaryFor(emp, period);
   const gross = grossOf(s);
+  const isContractor = s.taxRegime==='contractor';
+  const pfOn = !isContractor || s.contractorPfApplicable;
+  const esiOn = !isContractor || s.contractorEsiApplicable;
   const basicForPf = ORG.applyPfCeiling ? Math.min(s.basic, ORG.pfCeiling||15000) : s.basic;
-  const pfEmployee = Math.round(basicForPf*0.12);
+  const pfEmployee = pfOn ? Math.round(basicForPf*0.12) : 0;
   const pfEmployer = pfEmployee; // mirrored, standard practice; bonus excluded from PF wages
-  const esi = gross<=21000 ? Math.round(gross*0.0075) : 0; // bonus excluded from ESI wages
+  const esi = (esiOn && gross<=21000) ? Math.round(gross*0.0075) : 0; // bonus excluded from ESI wages; threshold always applies regardless of the toggle
   const grossWithBonus = gross + bonus;
-  const pt = ptFor(grossWithBonus);
+  const pt = ptFor(grossWithBonus, period);
 
-  const grossAnnual = gross*12;
-  const regularCalc = annualTaxFor(s, grossAnnual);
-  const regularTds = Math.round(regularCalc.total/12);
-  let tds = regularTds, bonusTaxImpact = 0, taxableAnnual = regularCalc.taxableAnnual;
-  if(bonus > 0){
-    const withBonusCalc = annualTaxFor(s, grossAnnual + bonus);
-    bonusTaxImpact = Math.max(0, withBonusCalc.total - regularCalc.total);
-    tds = regularTds + Math.round(bonusTaxImpact);
-    taxableAnnual = withBonusCalc.taxableAnnual;
+  let tds, regularTds, bonusTaxImpact = 0, taxableAnnual = 0;
+  if(isContractor){
+    // Section 194C: a flat % of what's actually paid this month — no annualisation, no
+    // slabs, no standard deduction/80C/HRA. Bonus (if any) is just added to the same base.
+    const rate = (s.contractorTdsRate!=null ? s.contractorTdsRate : 1)/100;
+    tds = Math.round(grossWithBonus*rate);
+    regularTds = Math.round(gross*rate);
+    bonusTaxImpact = tds - regularTds;
+  } else {
+    const grossAnnual = gross*12;
+    const regularCalc = annualTaxFor(s, grossAnnual);
+    regularTds = Math.round(regularCalc.total/12);
+    tds = regularTds; taxableAnnual = regularCalc.taxableAnnual;
+    if(bonus > 0){
+      const withBonusCalc = annualTaxFor(s, grossAnnual + bonus);
+      bonusTaxImpact = Math.max(0, withBonusCalc.total - regularCalc.total);
+      tds = regularTds + Math.round(bonusTaxImpact);
+      taxableAnnual = withBonusCalc.taxableAnnual;
+    }
   }
 
   const totalDeductions = pfEmployee+esi+pt+tds;
@@ -1389,7 +1449,7 @@ function openPayslipView(payslipId){
           <span>Paid Through Bank Transfer${bankLine ? ' — ' + esc(bankLine) : ''}</span>
           <span>ELECTRONIC DOCUMENT — NO SIGNATURE REQUIRED</span>
         </div>
-        <div class="regime-note">Computed under the <b>${p.taxRegime==='old'?'Old':'New'} Tax Regime</b> on an estimated annual taxable income of ${money(p.taxableAnnual)}. EPF, ESI, PT and TDS follow the statutory formulas configured in Settings and are provided for reference — please verify against current government notifications and consult your CA before filing.</div>
+        <div class="regime-note">${p.taxRegime==='contractor' ? `Computed as a flat <b>${(p.salarySnapshot&&p.salarySnapshot.contractorTdsRate!=null)?p.salarySnapshot.contractorTdsRate:1}% TDS under Section 194C</b> (Contractor) — no slabs, standard deduction, or 80C/80D apply.` : `Computed under the <b>${regimeLabel(p.taxRegime)} Tax Regime</b> on an estimated annual taxable income of ${money(p.taxableAnnual)}.`} EPF, ESI, PT and TDS follow the statutory formulas configured in Settings and are provided for reference — please verify against current government notifications and consult your CA before filing.</div>
       </div>
     </div>
     <div class="btn-row no-print" style="margin-top:16px;">
@@ -3820,6 +3880,11 @@ function renderSettings(c, actions){
         <input type="number" id="pfCeilingVal" value="${ORG.pfCeiling||15000}" style="margin-top:6px;max-width:160px;">
       </div>
       <div class="section-label">Professional Tax Slabs (monthly gross, ₹)</div>
+      <div class="field" style="max-width:340px;">
+        <label>Annual PT Cap (₹/year, 0 = disabled)</label>
+        <input type="number" min="0" step="1" id="ptAnnualCapVal" value="${ORG.ptAnnualCap||0}">
+        <p class="hint" style="margin-top:4px;">When set, February's PT deduction tops up so the year totals exactly this — e.g. Maharashtra: ₹200×11 + ₹300 in Feb = ₹2,500/year. Also used to reduce Old Regime taxable income by the PT actually paid (Section 16(iii)). Set to 0 for states without an annual cap.</p>
+      </div>
       <div id="ptSlabWrap"></div>
       <div class="btn-row" style="margin-top:10px;"><button class="btn secondary sm" id="addSlab">+ Add Slab</button><button class="btn sm" id="saveRules">Save Statutory Rules</button></div>
     </div>
@@ -3865,7 +3930,7 @@ function renderSettings(c, actions){
         ${EMPLOYEES.map(e=>{ const s = currentSalary(e); const g = grossOf(s); return `<tr>
           <td><b>${esc(e.name)}</b><div style="color:var(--muted);font-size:11.5px;">${esc(e.empCode)}</div></td>
           <td class="num-cell">${money(g)}</td>
-          <td><span class="pill ${s.taxRegime==='old'?'bad':'good'}">${s.taxRegime==='old'?'Old':'New'}</span></td>
+          <td><span class="pill ${regimePillClass(s.taxRegime)}">${regimeLabel(s.taxRegime)}</span></td>
           <td>${esc(s.effectiveFrom||'—')}</td>
           <td>${(e.salaryHistory||[]).length}</td>
           <td><button class="btn sm" data-revise="${e.id}">↻ Revise Salary</button></td>
@@ -3998,6 +4063,7 @@ function renderSettings(c, actions){
     document.querySelectorAll('[data-slab]').forEach(inp=>{ const [i,field] = inp.dataset.slab.split('-'); ORG.ptSlabs[Number(i)][field] = Number(inp.value)||0; });
     ORG.applyPfCeiling = document.getElementById('pfCeilingChk').checked;
     ORG.pfCeiling = Number(document.getElementById('pfCeilingVal').value)||15000;
+    ORG.ptAnnualCap = Number(document.getElementById('ptAnnualCapVal').value)||0;
     await saveOrg(); toast('Statutory rules saved.');
   };
 
