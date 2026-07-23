@@ -1974,9 +1974,10 @@ async function driveExportSheet(silent){
     const txnRows = [['Txn No.','Category','Direction','Party','Date','Due Date','Status','Reference','Subject','Subtotal','GST Mode','Tax Amount','Grand Total','Revision No.','Fund Received','Fund Received Date','Linked Invoice','Linked Proforma']]
       .concat(TRANSACTIONS.map(t=>{ const tot = calcTxnTotals(t); return [t.txnNo,TXN_CATEGORIES[t.txnCategory]?TXN_CATEGORIES[t.txnCategory].label:t.txnCategory,t.txnDirection,t.partyName,t.txnDate,t.dueDate,t.status,(t.referenceType||'')+' '+(t.reference||''),t.subject,tot.subtotal,t.gstMode,tot.taxAmount,tot.grandTotal,t.revisionNo||0,t.fundReceivedAmount||'',t.fundReceivedDate||'',t.linkedInvoice||'',t.linkedProforma||'']; }));
 
-    const expRows = [['Voucher No.','Vendor','Bill No.','Bill Date','Due Date','Category','Currency','Bill Amount (INR)','GST Mode','RCM','GST Amount','TDS Section','TDS Rate','TDS Amount','Net Payable','Paid','Balance','Status','Ledger Account','GSTR-2B Claim Month','Bill Attached','Receipt Attached','Payment Mode','Payment Reference','Date of Payment','Tally Voucher No.','Tally Voucher Date']]
+    const expRows = [['Voucher No.','Bill Type','Party','Bill No.','Bill Date','Due Date','Category','Currency','Amount (INR)','GST Mode','RCM','GST Amount','TDS Section','TDS Rate','TDS Amount','PF','PT','ESIC','Other Deduction','Net Payable','Paid','Balance','Status','Ledger Account','GSTR-2B Claim Month','Bill Attached','Receipt Attached','Payment Mode','Payment Reference','Date of Payment','Tally Voucher No.','Tally Voucher Date']]
       .concat(EXPENSES.map(e=>{ const tot = calcExpenseTotals(e); const sec = TDS_SECTION_BY_ID[e.tdsSectionId]; const ledger = (ORG.chartOfAccounts||[]).find(a=>a.id===e.ledgerAccountId);
-        return [e.voucherNo,e.vendorName,e.billNo,e.billDate,e.dueDate,e.category,e.currency||'INR',tot.amtINR,e.rcmApplicable?'RCM':e.gstMode,e.rcmApplicable?(e.rcmRate+'%'):'',tot.gstTotal,sec?sec.oldCode:'',e.tdsApplicable?e.tdsRate:'',tot.tdsAmount,tot.netPayable,e.paidAmount,tot.balance,tot.payStatus,ledger?ledger.code+' '+ledger.name:'',e.gstr2bClaimMonth||'',(e.billAttachments||e.attachments||[]).length?'Yes':'No',(e.receiptAttachments||[]).length?'Yes':'No',e.paymentMode||'',e.paymentRef||'',e.paymentDate||'',e.tallyVoucherNo||'',e.tallyVoucherDate||'']; }));
+        const party = e.billType==='SALARY' ? e.employeeName : e.billType==='INTERBANK' ? `${e.fromBankName||''} -> ${e.toBankName||''}` : e.vendorName;
+        return [e.voucherNo,e.billType||'SUPPLIER',party,e.billNo,e.billDate,e.dueDate,e.category,e.currency||'INR',tot.amtINR,e.rcmApplicable?'RCM':e.gstMode,e.rcmApplicable?(e.rcmRate+'%'):'',tot.gstTotal,sec?sec.oldCode:'',e.tdsApplicable?e.tdsRate:'',tot.tdsAmount,e.deductionsApplicable?e.pfAmt:'',e.deductionsApplicable?e.ptAmt:'',e.deductionsApplicable?e.esicAmt:'',e.deductionsApplicable?e.otherDeduction:'',tot.netPayable,e.paidAmount,tot.balance,tot.payStatus,ledger?ledger.code+' '+ledger.name:'',e.gstr2bClaimMonth||'',(e.billAttachments||e.attachments||[]).length?'Yes':'No',(e.receiptAttachments||[]).length?'Yes':'No',e.paymentMode||'',e.paymentRef||'',e.paymentDate||'',e.tallyVoucherNo||'',e.tallyVoucherDate||'']; }));
 
     await driveWriteSheetTab(sheetId, 'Employees', empRows);
     await driveWriteSheetTab(sheetId, 'Salary History', salRows);
@@ -3050,6 +3051,35 @@ const RCM_RATES = [0,5,12,18,28];
    government (with a matching Input Tax Credit). So unlike a normal bill, the GST here is
    tracked for compliance but does NOT add to what the vendor is owed. */
 function calcExpenseTotals(e){
+  const billType = e.billType || 'SUPPLIER';
+  function payStatusFor(netPayable, paid){
+    if(paid >= netPayable - 0.5) return 'Paid';
+    if(paid > 0) return 'Partial';
+    return 'Pending';
+  }
+  if(billType==='INTERBANK'){
+    // A transfer between the company's own accounts settles itself — there's nothing
+    // owed to anyone afterward, so it's always fully "paid" the moment it's recorded.
+    const amt = Number(e.transferAmount)||0;
+    return { amt, amtINR:amt, cgst:0, sgst:0, igst:0, gstTotal:0, tdsAmount:0, deductionsTotal:0,
+      grossTotal:amt, netPayable:amt, balance:0, payStatus:'Paid' };
+  }
+  if(billType==='STATUTORY'){
+    const amt = Number(e.statutoryAmount)||0;
+    const balance = Math.max(0, amt-(Number(e.paidAmount)||0));
+    return { amt, amtINR:amt, cgst:0, sgst:0, igst:0, gstTotal:0, tdsAmount:0, deductionsTotal:0,
+      grossTotal:amt, netPayable:amt, balance, payStatus:payStatusFor(amt, Number(e.paidAmount)||0) };
+  }
+  if(billType==='SALARY'){
+    const amt = Number(e.statutoryAmount)||0;
+    const tdsAmount = e.tdsApplicable ? amt*(Number(e.tdsRate)||0)/100 : 0;
+    const deductionsTotal = e.deductionsApplicable ? (Number(e.pfAmt)||0)+(Number(e.ptAmt)||0)+(Number(e.esicAmt)||0)+(Number(e.otherDeduction)||0) : 0;
+    const netPayable = amt - tdsAmount - deductionsTotal;
+    const balance = Math.max(0, netPayable-(Number(e.paidAmount)||0));
+    return { amt, amtINR:amt, cgst:0, sgst:0, igst:0, gstTotal:0, tdsAmount, deductionsTotal,
+      grossTotal:amt, netPayable, balance, payStatus:payStatusFor(netPayable, Number(e.paidAmount)||0) };
+  }
+  // SUPPLIER (default/legacy records without a billType) — full GST/RCM/TDS/deductions.
   const rate = Number(e.exchRate)||1;
   const amt = Number(e.billAmount)||0;
   const amtINR = amt*rate;
@@ -3065,13 +3095,12 @@ function calcExpenseTotals(e){
   }
   const gstTotal = cgst+sgst+igst;
   const tdsAmount = e.tdsApplicable ? amtINR * (Number(e.tdsRate)||0) / 100 : 0;
+  const deductionsTotal = e.deductionsApplicable ? (Number(e.pfAmt)||0)+(Number(e.ptAmt)||0)+(Number(e.esicAmt)||0)+(Number(e.otherDeduction)||0) : 0;
   const grossTotal = e.rcmApplicable ? amtINR : (amtINR + gstTotal);
-  const netPayable = grossTotal - tdsAmount;
+  const netPayable = grossTotal - tdsAmount - deductionsTotal;
   const balance = Math.max(0, netPayable - (Number(e.paidAmount)||0));
-  let payStatus = 'Pending';
-  if((Number(e.paidAmount)||0) >= netPayable - 0.5) payStatus = 'Paid';
-  else if((Number(e.paidAmount)||0) > 0) payStatus = 'Partial';
-  return { amt, amtINR, cgst, sgst, igst, gstTotal, tdsAmount, grossTotal, netPayable, balance, payStatus };
+  return { amt, amtINR, cgst, sgst, igst, gstTotal, tdsAmount, deductionsTotal,
+    grossTotal, netPayable, balance, payStatus:payStatusFor(netPayable, Number(e.paidAmount)||0) };
 }
 function expIsLocked(e){ return calcExpenseTotals(e).payStatus==='Paid' && !ORG.allowFinalisedExpenseEdit; }
 function expStatusPill(status){
@@ -3109,12 +3138,18 @@ function renderExpenses(c, actions){
       <div id="expTableWrap"></div>
     </div>
   `;
+  const BILL_TYPE_LABELS = { SUPPLIER:'Supplier', STATUTORY:'Statutory', SALARY:'Salary', INTERBANK:'Inter-Bank' };
+  function expPartyLabel(e){
+    if(e.billType==='SALARY') return e.employeeName || '—';
+    if(e.billType==='INTERBANK') return `${e.fromBankName||'?'} → ${e.toBankName||'?'}`;
+    return e.vendorName || '—';
+  }
   function draw(){
     const q = (document.getElementById('expSearch').value||'').toLowerCase();
     const cat = document.getElementById('expCatFilter').value;
     const st = document.getElementById('expStatusFilter').value;
     let list = EXPENSES.filter(e=>{
-      const mq = !q || [e.voucherNo,e.vendorName,e.billNo,e.description].some(v=>(v||'').toLowerCase().includes(q));
+      const mq = !q || [e.voucherNo,e.vendorName,e.employeeName,e.billNo,e.description,e.statutoryType,e.fromBankName,e.toBankName].some(v=>(v||'').toLowerCase().includes(q));
       const mc = !cat || e.category===cat;
       const ms = !st || calcExpenseTotals(e).payStatus===st;
       return mq && mc && ms;
@@ -3122,14 +3157,15 @@ function renderExpenses(c, actions){
     list = list.slice().sort((a,b)=> (b.billDate||'').localeCompare(a.billDate||''));
     const wrap = document.getElementById('expTableWrap');
     if(!list.length){ wrap.innerHTML = '<div class="empty"><div class="icon">🧾</div>No bills recorded yet.<div class="cta"><button class="btn" id="emptyNewExp">+ New Bill / Expense</button></div></div>'; document.getElementById('emptyNewExp').onclick=()=>openExpenseForm(); return; }
-    wrap.innerHTML = `<table><thead><tr><th>Voucher No.</th><th>Vendor</th><th>Date</th><th>Category</th><th class="num-cell">Net Payable</th><th class="num-cell">Balance</th><th>TDS</th><th>Docs</th><th>Tally</th><th>Status</th><th></th></tr></thead><tbody>
+    wrap.innerHTML = `<table><thead><tr><th>Voucher No.</th><th>Type</th><th>Party</th><th>Date</th><th>Category</th><th class="num-cell">Net Payable</th><th class="num-cell">Balance</th><th>TDS</th><th>Docs</th><th>Tally</th><th>Status</th><th></th></tr></thead><tbody>
       ${list.map(e=>{ const tot = calcExpenseTotals(e);
         const hasBill = (e.billAttachments||e.attachments||[]).length>0;
         const hasReceipt = (e.receiptAttachments||[]).length>0;
         const needsReceipt = tot.payStatus==='Paid' || tot.payStatus==='Partial';
         return `<tr>
         <td><b>${esc(e.voucherNo)}</b>${e.billNo?`<div style="color:var(--muted);font-size:11.5px;">${esc(e.billNo)}</div>`:''}${e.currency&&e.currency!=='INR'?` <span class="pill neutral">${esc(e.currency)}</span>`:''}${e.rcmApplicable?' <span class="pill warn">RCM</span>':''}</td>
-        <td>${esc(e.vendorName||'—')}</td><td>${esc(e.billDate||'—')}</td><td>${esc(e.category||'—')}</td>
+        <td><span class="pill neutral">${esc(BILL_TYPE_LABELS[e.billType]||'Supplier')}</span></td>
+        <td>${esc(expPartyLabel(e))}</td><td>${esc(e.billDate||'—')}</td><td>${esc(e.category||'—')}</td>
         <td class="num-cell">${money(tot.netPayable)}</td><td class="num-cell">${money(tot.balance)}</td>
         <td>${e.tdsApplicable?`<span class="pill accent">${esc((TDS_SECTION_BY_ID[e.tdsSectionId]||{}).oldCode||'')} ${e.tdsRate}%</span>`:'—'}</td>
         <td>
@@ -3173,10 +3209,13 @@ let pendingTallyFile = null;
 function openExpenseForm(expId){
   const isEdit = !!expId;
   const e = isEdit ? EXPENSES.find(x=>x.id===expId) : {
-    vendorId:'', billNo:'', billDate:new Date().toISOString().slice(0,10), dueDate:'',
+    billType:'SUPPLIER', vendorId:'', billNo:'', billDate:new Date().toISOString().slice(0,10), dueDate:'',
     description:'', category:'Materials', billAmount:0, currency:'INR', exchRate:1, gstMode:'Intra', gstPct:18,
     rcmApplicable:false, rcmRate:18, rcmSupplyType:'intra', gstr2bClaimMonth:'',
     tdsApplicable:false, tdsSectionId:'', tdsRate:0, ledgerAccountId:'',
+    deductionsApplicable:false, pfAmt:0, ptAmt:0, esicAmt:0, otherDeduction:0, otherDeductionDetails:'',
+    employeeId:'', salaryMonth:'', statutoryType:'', statutoryAmount:0,
+    fromBankName:'', toBankName:'', transferAmount:0,
     paidAmount:0, paidFrom:'', paymentMode:'', paymentRef:'', paymentDate:'', notes:'', tallyVoucherNo:'', tallyVoucherDate:''
   };
   if(isEdit && expIsLocked(e)){ toast('This bill is fully paid and locked. Enable editing in Settings → Bills & Expenses if this needs correcting.', true); return; }
@@ -3185,27 +3224,62 @@ function openExpenseForm(expId){
   pendingReceiptFiles = isEdit ? (e.receiptAttachments || []).slice() : [];
   pendingTallyFile = isEdit ? (e.tallyAttachment||null) : null;
   const activeAccounts = (ORG.chartOfAccounts||[]).filter(a=>a.active);
+  const activeStaff = EMPLOYEES; // all current staff are eligible for the Salary bill type
 
   openModal(`
     <div class="modal-head"><h3>${isEdit?'Edit':'New'} Bill / Expense</h3><button class="modal-close" id="mClose">✕</button></div>
     <form id="expForm">
       <div class="grid cols-3">
-        <div class="field"><label>Vendor</label><select name="vendorId"><option value="">— Select Vendor —</option>${PARTIES.map(p=>`<option value="${p.id}" ${e.vendorId===p.id?'selected':''}>${esc(p.partyName)}</option>`).join('')}</select></div>
-        <div class="field"><label>Bill No.</label><input type="text" name="billNo" value="${esc(e.billNo)}"></div>
-        <div class="field"><label>Category</label><select name="category">${EXPENSE_CATEGORIES.map(c=>`<option ${e.category===c?'selected':''}>${c}</option>`).join('')}</select></div>
+        <div class="field"><label>Bill Type</label><select name="billType" id="expBillType" ${isEdit?'disabled':''}>
+          <option value="SUPPLIER" ${e.billType==='SUPPLIER'?'selected':''}>Bills from Supplier / Subcontractor</option>
+          <option value="STATUTORY" ${e.billType==='STATUTORY'?'selected':''}>Statutory Payment</option>
+          <option value="SALARY" ${e.billType==='SALARY'?'selected':''}>Salary or Wages</option>
+          <option value="INTERBANK" ${e.billType==='INTERBANK'?'selected':''}>Inter-Bank Transfer</option>
+        </select>${isEdit?`<input type="hidden" name="billType" value="${esc(e.billType||'SUPPLIER')}">`:''}</div>
+        <div class="field" id="expBillNoWrap"><label id="expBillNoLabel">Bill No.</label><input type="text" name="billNo" value="${esc(e.billNo)}"></div>
+        <div class="field" id="expCategoryWrap"><label>Category</label><select name="category">${EXPENSE_CATEGORIES.map(c=>`<option ${e.category===c?'selected':''}>${c}</option>`).join('')}</select></div>
+      </div>
+      <div class="grid cols-3">
+        <div class="field" id="expVendorWrap"><label id="expVendorLabel">Vendor</label><select name="vendorId"><option value="">— Select Vendor —</option>${PARTIES.map(p=>`<option value="${p.id}" ${e.vendorId===p.id?'selected':''}>${esc(p.partyName)}</option>`).join('')}</select></div>
+        <div class="field" id="expEmployeeWrap" style="display:none;"><label>Staff Member</label><select name="employeeId">
+          <option value="">— Select Staff —</option>${activeStaff.map(s=>`<option value="${s.id}" ${e.employeeId===s.id?'selected':''}>${esc(s.name)} (${esc(s.empCode)})</option>`).join('')}
+        </select></div>
+        <div class="field" id="expSalaryMonthWrap" style="display:none;"><label>Salary Month</label><input type="month" name="salaryMonth" value="${esc(e.salaryMonth)}"></div>
+        <div class="field" id="expStatutoryTypeWrap" style="display:none;"><label>Statutory Type</label><select name="statutoryType">
+          <option value="">— Select —</option>
+          <option value="PF" ${e.statutoryType==='PF'?'selected':''}>Provident Fund (PF)</option>
+          <option value="ESIC" ${e.statutoryType==='ESIC'?'selected':''}>ESIC</option>
+          <option value="TDS" ${e.statutoryType==='TDS'?'selected':''}>TDS</option>
+          <option value="PROF_TAX" ${e.statutoryType==='PROF_TAX'?'selected':''}>Professional Tax</option>
+          <option value="GST_LIABILITY" ${e.statutoryType==='GST_LIABILITY'?'selected':''}>GST Tax Liability</option>
+          <option value="OTHER" ${e.statutoryType==='OTHER'?'selected':''}>Other</option>
+        </select></div>
+        <div class="field" id="expLedgerWrap"><label>Ledger Account <span style="font-weight:400;color:var(--muted);">(optional)</span></label><select name="ledgerAccountId"><option value="">— Unassigned —</option>${activeAccounts.map(a=>`<option value="${a.id}" ${e.ledgerAccountId===a.id?'selected':''}>${esc(a.code)} · ${esc(a.name)}</option>`).join('')}</select></div>
       </div>
       <div class="grid cols-3">
         <div class="field"><label>Bill Date</label><input type="date" name="billDate" value="${esc(e.billDate)}" required></div>
-        <div class="field"><label>Due Date</label><input type="date" name="dueDate" value="${esc(e.dueDate)}"></div>
-        <div class="field"><label>Ledger Account <span style="font-weight:400;color:var(--muted);">(optional)</span></label><select name="ledgerAccountId"><option value="">— Unassigned —</option>${activeAccounts.map(a=>`<option value="${a.id}" ${e.ledgerAccountId===a.id?'selected':''}>${esc(a.code)} · ${esc(a.name)}</option>`).join('')}</select></div>
+        <div class="field" id="expDueDateWrap"><label>Due Date</label><input type="date" name="dueDate" value="${esc(e.dueDate)}"></div>
       </div>
-      <div class="field"><label>Description</label><input type="text" name="description" value="${esc(e.description)}"></div>
-      <div class="section-label">Amount &amp; Currency</div>
-      <div class="grid cols-3">
+      <div class="field" id="expDescriptionWrap"><label>Description</label><input type="text" name="description" value="${esc(e.description)}"></div>
+      <div class="section-label" id="expAmountCurrencyLabel">Amount &amp; Currency</div>
+      <div class="grid cols-3" id="expCurrencyRow">
         <div class="field"><label>Currency</label><select name="currency" id="expCurrency">${Object.keys(CURRENCY_SYMBOLS).map(c=>`<option ${e.currency===c?'selected':''}>${c}</option>`).join('')}</select></div>
         <div class="field"><label>Exchange Rate (→ INR)</label><input type="number" min="0" step="0.0001" name="exchRate" id="expExchRate" value="${e.exchRate}"></div>
         <div class="field"><label>Bill Amount (before tax, in bill currency)</label><input type="number" min="0" step="0.01" name="billAmount" id="expBillAmount" value="${e.billAmount}"></div>
       </div>
+      <div class="grid cols-3" id="expSimpleAmountRow" style="display:none;">
+        <div class="field"><label id="expStatutoryAmountLabel">Amount</label><input type="number" min="0" step="0.01" name="statutoryAmount" id="expStatutoryAmount" value="${e.statutoryAmount}"></div>
+      </div>
+      <div id="expInterBankWrap" style="display:none;background:#ECFEFF;border:1px solid #A5F3FC;border-radius:8px;padding:10px 12px;margin-bottom:12px;">
+        <label style="font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#0E7490;">🔁 Inter-Bank Transfer Details</label>
+        <div class="grid cols-3" style="margin-top:6px;">
+          <div class="field" style="margin-bottom:0;"><label>From Account</label><input type="text" name="fromBankName" value="${esc(e.fromBankName)}" placeholder="e.g. ICICI Current A/c"></div>
+          <div class="field" style="margin-bottom:0;"><label>To Account</label><input type="text" name="toBankName" value="${esc(e.toBankName)}" placeholder="e.g. HDFC Savings A/c"></div>
+          <div class="field" style="margin-bottom:0;"><label>Transfer Amount (₹)</label><input type="number" min="0" step="0.01" name="transferAmount" id="expTransferAmount" value="${e.transferAmount}"></div>
+        </div>
+        <p class="hint" style="margin:6px 0 0;">This appears as an outflow on the source account and an inflow on the destination once the Bank tab exists.</p>
+      </div>
+      <div id="expGstSection">
       <div class="section-label">GST</div>
       <div class="grid cols-3">
         <div class="field"><label>GST Mode</label><select name="gstMode" id="expGstMode" ${e.rcmApplicable?'disabled':''}><option value="None" ${e.gstMode==='None'?'selected':''}>None</option><option value="Intra" ${e.gstMode==='Intra'?'selected':''}>Intra-state (CGST + SGST)</option><option value="Inter" ${e.gstMode==='Inter'?'selected':''}>Inter-state (IGST)</option></select></div>
@@ -3220,7 +3294,9 @@ function openExpenseForm(expId){
         </div>
       </div>
       <div class="field"><label>GSTR-2B Claim Month <span style="font-weight:400;color:var(--muted);">(only if supplier files late — leave blank otherwise)</span></label><input type="month" name="gstr2bClaimMonth" value="${esc(e.gstr2bClaimMonth)}"></div>
-      <div class="section-label">TDS</div>
+      </div>
+      <div class="section-label" id="expTdsSectionLabel">TDS</div>
+      <div id="expTDSSection">
       <div class="field"><label class="checkline"><input type="checkbox" name="tdsApplicable" id="expTdsChk" ${e.tdsApplicable?'checked':''}> TDS applicable on this bill</label></div>
       <div class="grid cols-3" id="expTdsFields" style="display:${e.tdsApplicable?'grid':'none'};">
         <div class="field" style="grid-column:span 2;"><label>TDS Section</label><select name="tdsSectionId" id="expTdsSection">
@@ -3228,8 +3304,20 @@ function openExpenseForm(expId){
         </select></div>
         <div class="field"><label>TDS Rate %</label><input type="number" min="0" step="0.01" name="tdsRate" id="expTdsRate" value="${e.tdsRate}"></div>
       </div>
+      </div>
+      <div id="expDeductionsSection" style="background:#FAF5FF;border:1px solid #E9D5FF;border-radius:8px;padding:10px 12px;margin:12px 0;">
+        <label class="checkline"><input type="checkbox" name="deductionsApplicable" id="expDeductChk" ${e.deductionsApplicable?'checked':''}> Deductions Applicable (PF / PT / ESIC)</label>
+        <div class="grid cols-4" id="expDeductFields" style="display:${e.deductionsApplicable?'grid':'none'};margin-top:8px;">
+          <div class="field" style="margin-bottom:0;"><label>PF</label><input type="number" min="0" step="0.01" name="pfAmt" id="expPF" value="${e.pfAmt||0}"></div>
+          <div class="field" style="margin-bottom:0;"><label>PT</label><input type="number" min="0" step="0.01" name="ptAmt" id="expPT" value="${e.ptAmt||0}"></div>
+          <div class="field" style="margin-bottom:0;"><label>ESIC</label><input type="number" min="0" step="0.01" name="esicAmt" id="expESIC" value="${e.esicAmt||0}"></div>
+          <div class="field" style="margin-bottom:0;"><label>Other</label><input type="number" min="0" step="0.01" name="otherDeduction" id="expOtherDed" value="${e.otherDeduction||0}"></div>
+          <div class="field" style="grid-column:span 4;margin-bottom:0;"><label>Other Deduction Details</label><input type="text" name="otherDeductionDetails" value="${esc(e.otherDeductionDetails)}"></div>
+        </div>
+      </div>
       <div id="expTotalsPreview"></div>
-      <div class="section-label" style="margin-top:14px;">Payment</div>
+      <div class="section-label" id="expPaymentLabel" style="margin-top:14px;">Payment</div>
+      <div id="expAdvanceSection">
       <div class="grid cols-3">
         <div class="field"><label>Amount Paid So Far (₹)</label><input type="number" min="0" step="0.01" name="paidAmount" id="expPaidAmount" value="${e.paidAmount}"></div>
         <div class="field"><label>Payment Mode</label><select name="paymentMode" id="expPaymentMode">
@@ -3243,6 +3331,7 @@ function openExpenseForm(expId){
         </select></div>
       </div>
       <div id="expPaymentDetailFields"></div>
+      </div>
       <div class="field"><label>Notes</label><textarea name="notes" rows="2">${esc(e.notes)}</textarea></div>
       <div class="section-label" style="display:flex;align-items:center;justify-content:space-between;">
         <span>📋 Tally Voucher</span>${e.tallyVoucherNo?'<span class="pill good">Posted</span>':'<span class="pill warn">Pending</span>'}
@@ -3276,8 +3365,46 @@ function openExpenseForm(expId){
   `, true);
   document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
 
+  /* Drives which sections are visible/required based on Bill Type — mirrors the same pattern
+     as the reference app: SUPPLIER (full GST/RCM/TDS/deductions), STATUTORY (a plain amount,
+     nothing else), SALARY (amount + TDS + PF/PT/ESIC deductions), INTERBANK (just the
+     transfer itself, no tax/payment tracking since the transfer settles immediately). */
+  function currentBillType(){ return document.getElementById('expBillType') ? document.getElementById('expBillType').value : (e.billType||'SUPPLIER'); }
+  function show(id, on){ const el=document.getElementById(id); if(el) el.style.display = on ? '' : 'none'; }
+  function applyBillType(){
+    const bt = currentBillType() || 'SUPPLIER';
+    show('expVendorWrap', bt!=='SALARY' && bt!=='INTERBANK');
+    show('expEmployeeWrap', bt==='SALARY');
+    show('expSalaryMonthWrap', bt==='SALARY');
+    show('expStatutoryTypeWrap', bt==='STATUTORY');
+    show('expDescriptionWrap', bt!=='INTERBANK');
+    show('expCurrencyRow', bt==='SUPPLIER');
+    show('expSimpleAmountRow', bt==='STATUTORY' || bt==='SALARY');
+    show('expInterBankWrap', bt==='INTERBANK');
+    show('expGstSection', bt==='SUPPLIER');
+    show('expTDSSection', bt==='SUPPLIER' || bt==='SALARY');
+    document.getElementById('expTdsSectionLabel').style.display = (bt==='SUPPLIER'||bt==='SALARY') ? '' : 'none';
+    show('expDeductionsSection', bt==='SUPPLIER' || bt==='SALARY');
+    show('expAdvanceSection', bt!=='INTERBANK');
+    document.getElementById('expPaymentLabel').style.display = bt==='INTERBANK' ? 'none' : '';
+    show('expDueDateWrap', bt!=='INTERBANK');
+
+    const vendorLabel = document.getElementById('expVendorLabel');
+    if(vendorLabel) vendorLabel.textContent = bt==='STATUTORY' ? 'Authority / Department' : 'Vendor';
+    const statAmtLabel = document.getElementById('expStatutoryAmountLabel');
+    if(statAmtLabel) statAmtLabel.textContent = bt==='SALARY' ? 'Salary / Wages Amount' : 'Amount';
+    const billNoLabel = document.getElementById('expBillNoLabel');
+    if(billNoLabel) billNoLabel.textContent = bt==='STATUTORY' ? 'Challan / Reference No' : bt==='SALARY' ? 'Payslip / Ref No' : bt==='INTERBANK' ? 'Transfer Ref / UTR No' : 'Bill No.';
+    drawTotalsPreview();
+  }
+  const billTypeSel = document.getElementById('expBillType');
+  if(!isEdit) billTypeSel.addEventListener('change', applyBillType);
+  applyBillType();
+
   function readForm(){
+    const bt = currentBillType();
     return {
+      billType: bt,
       billAmount: Number(document.getElementById('expBillAmount').value)||0,
       exchRate: Number(document.getElementById('expExchRate').value)||1,
       gstMode: document.getElementById('expGstMode').value,
@@ -3287,18 +3414,33 @@ function openExpenseForm(expId){
       rcmSupplyType: document.getElementById('expRcmSupply').value,
       tdsApplicable: document.getElementById('expTdsChk').checked,
       tdsRate: Number(document.getElementById('expTdsRate').value)||0,
+      deductionsApplicable: document.getElementById('expDeductChk').checked,
+      pfAmt: Number(document.getElementById('expPF').value)||0,
+      ptAmt: Number(document.getElementById('expPT').value)||0,
+      esicAmt: Number(document.getElementById('expESIC').value)||0,
+      otherDeduction: Number(document.getElementById('expOtherDed').value)||0,
+      statutoryAmount: Number(document.getElementById('expStatutoryAmount').value)||0,
+      transferAmount: Number(document.getElementById('expTransferAmount').value)||0,
       paidAmount: Number(document.getElementById('expPaidAmount').value)||0
     };
   }
   function drawTotalsPreview(){
+    const bt = currentBillType();
     const tot = calcExpenseTotals(readForm());
+    if(bt==='INTERBANK'){
+      document.getElementById('expTotalsPreview').innerHTML = `
+        <div class="divider"></div>
+        <div class="hint">This transfer settles immediately between the two accounts — nothing further to track once saved.</div>`;
+      return;
+    }
+    const payLabel = bt==='SUPPLIER' ? 'Net Payable to Vendor' : bt==='SALARY' ? 'Net Payable to Staff' : 'Net Payable';
     document.getElementById('expTotalsPreview').innerHTML = `
       <div class="divider"></div>
       <div class="grid cols-4">
-        <div><label>Bill Amount (INR)</label><div><b>${money2(tot.amtINR)}</b></div></div>
-        <div><label>GST Amount${document.getElementById('expRcmChk').checked?' (self-assessed, not paid to vendor)':''}</label><div><b>${money2(tot.gstTotal)}</b></div></div>
-        <div><label>TDS Deducted</label><div><b>${money2(tot.tdsAmount)}</b></div></div>
-        <div><label>Net Payable to Vendor</label><div><b>${money2(tot.netPayable)}</b></div></div>
+        <div><label>${bt==='SUPPLIER'?'Bill Amount (INR)':'Amount'}</label><div><b>${money2(tot.amtINR)}</b></div></div>
+        ${bt==='SUPPLIER' ? `<div><label>GST Amount${document.getElementById('expRcmChk').checked?' (self-assessed, not paid to vendor)':''}</label><div><b>${money2(tot.gstTotal)}</b></div></div>` : ''}
+        ${(bt==='SUPPLIER'||bt==='SALARY') ? `<div><label>TDS Deducted</label><div><b>${money2(tot.tdsAmount)}</b></div></div><div><label>Deductions (PF/PT/ESIC)</label><div><b>${money2(tot.deductionsTotal)}</b></div></div>` : ''}
+        <div><label>${payLabel}</label><div><b>${money2(tot.netPayable)}</b></div></div>
         <div><label>Balance Due</label><div><b style="${tot.balance>0?'color:var(--bad);':''}">${money2(tot.balance)}</b></div></div>
       </div>`;
   }
@@ -3311,6 +3453,10 @@ function openExpenseForm(expId){
     if(s) document.getElementById('expTdsRate').value = s.defaultRate;
     drawTotalsPreview();
   });
+  document.getElementById('expDeductChk').addEventListener('change', (ev)=>{
+    document.getElementById('expDeductFields').style.display = ev.target.checked?'grid':'none';
+    drawTotalsPreview();
+  });
   document.getElementById('expRcmChk').addEventListener('change', (ev)=>{
     const on = ev.target.checked;
     document.getElementById('expRcmHelp').style.display = on?'block':'none';
@@ -3319,7 +3465,7 @@ function openExpenseForm(expId){
     document.getElementById('expGstPct').disabled = on;
     drawTotalsPreview();
   });
-  ['expBillAmount','expExchRate','expGstMode','expGstPct','expRcmRate','expRcmSupply','expTdsRate','expPaidAmount'].forEach(id=> document.getElementById(id).addEventListener('input', drawTotalsPreview));
+  ['expBillAmount','expExchRate','expGstMode','expGstPct','expRcmRate','expRcmSupply','expTdsRate','expPaidAmount','expPF','expPT','expESIC','expOtherDed','expStatutoryAmount','expTransferAmount'].forEach(id=> document.getElementById(id).addEventListener('input', drawTotalsPreview));
   drawTotalsPreview();
 
   /* Bank details shown here are read from Settings → Company Details — the person doesn't
@@ -3414,18 +3560,27 @@ function openExpenseForm(expId){
 }
 async function submitExpenseForm(ev, isEdit, e){
   const fd = new FormData(ev.target);
+  const billType = fd.get('billType') || 'SUPPLIER';
   const vendor = PARTIES.find(p=>p.id===fd.get('vendorId'));
+  const employee = billType==='SALARY' ? EMPLOYEES.find(x=>x.id===fd.get('employeeId')) : null;
   const rec = {
-    id: e.id||uid(), vendorId: fd.get('vendorId'), vendorName: vendor?vendor.partyName:'',
-    billNo: fd.get('billNo').trim(), billDate: fd.get('billDate'), dueDate: fd.get('dueDate'),
-    description: fd.get('description').trim(), category: fd.get('category'),
+    id: e.id||uid(), billType,
+    vendorId: fd.get('vendorId')||'', vendorName: vendor?vendor.partyName:'',
+    employeeId: employee?employee.id:'', employeeName: employee?employee.name:'', salaryMonth: fd.get('salaryMonth')||'',
+    statutoryType: fd.get('statutoryType')||'', statutoryAmount: Number(fd.get('statutoryAmount'))||0,
+    fromBankName: fd.get('fromBankName')||'', toBankName: fd.get('toBankName')||'', transferAmount: Number(fd.get('transferAmount'))||0,
+    billNo: fd.get('billNo').trim(), billDate: fd.get('billDate'), dueDate: fd.get('dueDate')||'',
+    description: fd.get('description')?fd.get('description').trim():'', category: fd.get('category')||'',
     billAmount: Number(fd.get('billAmount'))||0, currency: fd.get('currency')||'INR', exchRate: Number(fd.get('exchRate'))||1,
-    gstMode: fd.get('gstMode'), gstPct: Number(fd.get('gstPct'))||0,
+    gstMode: fd.get('gstMode')||'None', gstPct: Number(fd.get('gstPct'))||0,
     rcmApplicable: fd.get('rcmApplicable')==='on', rcmRate: Number(fd.get('rcmRate'))||0, rcmSupplyType: fd.get('rcmSupplyType')||'intra',
     gstr2bClaimMonth: fd.get('gstr2bClaimMonth')||'',
     tdsApplicable: fd.get('tdsApplicable')==='on', tdsSectionId: fd.get('tdsSectionId')||'', tdsRate: Number(fd.get('tdsRate'))||0,
+    deductionsApplicable: fd.get('deductionsApplicable')==='on', pfAmt: Number(fd.get('pfAmt'))||0, ptAmt: Number(fd.get('ptAmt'))||0,
+    esicAmt: Number(fd.get('esicAmt'))||0, otherDeduction: Number(fd.get('otherDeduction'))||0, otherDeductionDetails: (fd.get('otherDeductionDetails')||'').trim(),
     ledgerAccountId: fd.get('ledgerAccountId')||'',
-    paidAmount: Number(fd.get('paidAmount'))||0, paidFrom: e.paidFrom||'', paymentMode: fd.get('paymentMode')||'',
+    paidAmount: billType==='INTERBANK' ? (Number(fd.get('transferAmount'))||0) : (Number(fd.get('paidAmount'))||0),
+    paidFrom: e.paidFrom||'', paymentMode: fd.get('paymentMode')||'',
     paymentRef: (fd.get('paymentRef')||'').trim(), paymentDate: fd.get('paymentDate')||'', notes: fd.get('notes').trim(),
     tallyVoucherNo: fd.get('tallyVoucherNo').trim(), tallyVoucherDate: fd.get('tallyVoucherDate')||'', tallyAttachment: pendingTallyFile,
     billAttachments: pendingBillFiles, receiptAttachments: pendingReceiptFiles
