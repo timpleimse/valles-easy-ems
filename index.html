@@ -295,6 +295,7 @@ async function setJSON(key, value){
   else if(key.indexOf('compliance:')===0){ LOCAL.compliance[key.slice(11)] = value; }
   try{ localStorage.setItem(LS_KEY, JSON.stringify(LOCAL)); }
   catch(e){ toast('Local save failed — browser storage may be full. Try removing large documents.', true); return false; }
+  driveDirty = true;
   scheduleDriveSync();
   return true;
 }
@@ -585,7 +586,15 @@ function openModal(html, wide){
   document.getElementById('modalBox').innerHTML = html;
   document.getElementById('overlay').classList.add('show');
 }
-function closeModal(){ document.getElementById('overlay').classList.remove('show'); document.getElementById('modalBox').innerHTML=''; }
+function closeModal(){
+  document.getElementById('overlay').classList.remove('show'); document.getElementById('modalBox').innerHTML='';
+  // Attachment view/download buttons hold a reference (with full base64 data) in this
+  // registry — without clearing it here, every attachment ever viewed across an entire
+  // session stays in memory forever, since nothing else ever removes it. That's a severe
+  // memory leak on any session with meaningful attachment usage — this bounds its lifetime
+  // to "whatever's in the currently open modal."
+  if(typeof _attachmentRegistry !== 'undefined'){ _attachmentRegistry = {}; _attachmentRegistryId = 0; }
+}
 document.getElementById('overlay').addEventListener('click', (e)=>{ if(e.target.id==='overlay' && !reconcilePending) closeModal(); });
 
 /* ============================= RENDER ROUTER ============================= */
@@ -1657,7 +1666,7 @@ function viewComplianceRecord(empId, recId){
 /* Uses Google Identity Services (OAuth) + Drive API v3 + Sheets API v4 directly via fetch —
    no server needed, works fine from a static GitHub Pages site. Scope is drive.file, so the
    app can only see/edit the files and folders it creates itself, never your whole Drive. */
-let gisTokenClient = null, driveAccessToken = null, driveTokenExpiry = 0, driveLastError = null, reconcilePending = false;
+let gisTokenClient = null, driveAccessToken = null, driveTokenExpiry = 0, driveLastError = null, reconcilePending = false, driveDirty = true;
 let driveSyncTimer = null, driveAutoInterval = null, driveBusy = false, driveReconnecting = false;
 
 function driveConnected(){ return !!(driveAccessToken && Date.now() < driveTokenExpiry); }
@@ -1885,6 +1894,7 @@ function startAutoSyncLoop(){
 }
 async function driveSyncNow(){
   if(!driveConnected() || driveBusy || !ORG.gdrive.connected || reconcilePending) return;
+  if(!driveDirty){ updateDriveStatusUI(); return; }
   driveBusy = true;
   try{
     if(!ORG.gdrive.folderId) await driveSetup();
@@ -1893,6 +1903,7 @@ async function driveSyncNow(){
     if(result && result.id){ ORG.gdrive.fileId = result.id; ORG.gdrive.lastSynced = new Date().toISOString(); driveLastError = null; await saveOrgSilent(); }
     try{ await driveExportSheet(true); driveLastError = null; }
     catch(e){ driveLastError = e.message; console.warn('Sheet sync failed:', e.message); }
+    driveDirty = false;
   }catch(e){ driveLastError = e.message; console.warn('Drive sync failed:', e.message); }
   driveBusy = false;
   updateDriveStatusUI();
