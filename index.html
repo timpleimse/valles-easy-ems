@@ -964,12 +964,13 @@ async function viewEmployee(empId){
     </div>
 
     <div class="section-label">Salary History (Audit Trail)</div>
-    <p class="hint" style="margin:-4px 0 8px;">Read-only. Salary revisions are made from <b>Settings → Salary Revision</b>.</p>
-    <table><thead><tr><th>Effective From</th><th>Basic</th><th>HRA</th><th>Gross</th><th>Regime</th><th>Revised</th><th>Reason</th></tr></thead><tbody>
+    <p class="hint" style="margin:-4px 0 8px;">Revisions are made from <b>Settings → Salary Revision</b>. You can delete a wrong or test entry below — this can't be undone, and deleting the most recent entry changes what "current salary" resolves to.</p>
+    <table><thead><tr><th>Effective From</th><th>Basic</th><th>HRA</th><th>Gross</th><th>Regime</th><th>Revised</th><th>Reason</th><th></th></tr></thead><tbody>
       ${hist.map(h=>`<tr>
         <td>${esc(h.effectiveFrom)}</td><td class="num-cell">${money(h.basic)}</td><td class="num-cell">${money(h.hra)}</td>
         <td class="num-cell">${money(grossOf(h))}</td><td>${regimeLabel(h.taxRegime)}</td>
         <td>${new Date(h.revisedAt).toLocaleDateString('en-IN')}</td><td>${esc(h.reason||'—')}</td>
+        <td class="no-print">${hist.length>1?`<button class="btn danger sm" data-delrev="${h.id}">🗑</button>`:''}</td>
       </tr>`).join('')}
     </tbody></table>
 
@@ -981,6 +982,27 @@ async function viewEmployee(empId){
     <div class="btn-row"><button class="btn secondary" id="mCancel">Close</button></div>
   `, true);
   document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+  document.querySelectorAll('[data-delrev]').forEach(b=> b.onclick=()=> deleteSalaryRevision(empId, b.dataset.delrev));
+}
+function deleteSalaryRevision(empId, revId){
+  const e = EMPLOYEES.find(x=>x.id===empId); if(!e) return;
+  const hist = (e.salaryHistory||[]).slice().sort((a,b)=> (a.effectiveFrom||'').localeCompare(b.effectiveFrom||''));
+  const rev = hist.find(h=>h.id===revId); if(!rev) return;
+  if(hist.length<=1){ toast('Cannot delete the only salary structure this employee has.', true); return; }
+  const isLatest = hist[hist.length-1].id===revId;
+  openModal(`
+    <div class="modal-head"><h3>Delete Salary Revision</h3><button class="modal-close" id="mClose">✕</button></div>
+    <p>Delete the revision effective <b>${esc(rev.effectiveFrom)}</b> (${esc(rev.reason||'no reason given')})? This cannot be undone.</p>
+    ${isLatest ? `<p class="hint" style="color:var(--bad);">⚠ This is the most recent revision — deleting it means the entry before it becomes the employee's current salary again, effective immediately. Any payslips already generated against this revision are unaffected, but new ones will use the earlier structure.</p>` : ''}
+    <div class="btn-row"><button class="btn danger" id="confirmDelRev">Delete Revision</button><button class="btn secondary" id="mCancel">Cancel</button></div>
+  `);
+  document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+  document.getElementById('confirmDelRev').onclick = async ()=>{
+    e.salaryHistory = (e.salaryHistory||[]).filter(h=>h.id!==revId);
+    tagRecord(e, false);
+    await saveEmployees();
+    closeModal(); toast('Salary revision deleted.'); viewEmployee(empId);
+  };
 }
 
 function openReviseSalary(empId){
@@ -1010,6 +1032,7 @@ function openReviseSalary(empId){
         <div id="ctcPreview"></div>
       </div>
       <div id="componentModeBlock" style="display:none;">
+        <p class="hint" style="margin:-4px 0 8px;">Switching here from "By CTC" carries over those calculated numbers for fine-tuning — it's not a separate calculation. Opening directly in this mode instead shows the employee's current structure as a starting point.</p>
         ${componentFieldsHtml(s)}
       </div>
       ${regimeFieldsHtml(s)}
@@ -1026,8 +1049,18 @@ function openReviseSalary(empId){
   wireRegimeToggle(document.getElementById('reviseForm'));
 
   let mode = 'ctc';
+  let lastCtcResult = null;
   function setMode(m){
     mode = m;
+    if(m==='component' && lastCtcResult){
+      // Carry the just-computed CTC breakdown into the manual fields, so switching modes
+      // is a fine-tuning step on the SAME numbers — not a silent swap to the old salary
+      // structure, which is what was happening before and looked like a calculation bug.
+      const r = lastCtcResult;
+      const setVal = (name, val)=>{ const el = document.querySelector(`#componentModeBlock [name="${name}"]`); if(el) el.value = (Math.round(val*100)/100); };
+      setVal('basic', r.basic); setVal('hra', r.hra); setVal('childrenEducation', r.childrenEducation);
+      setVal('otherAllowance', r.otherAllowance); setVal('lta', r.lta); setVal('reimbursement', r.reimbursement);
+    }
     document.getElementById('ctcModeBlock').style.display = m==='ctc' ? 'block' : 'none';
     document.getElementById('componentModeBlock').style.display = m==='ctc' ? 'none' : 'block';
     document.getElementById('modeCtc').className = 'btn sm' + (m==='ctc' ? '' : ' secondary');
@@ -1046,6 +1079,7 @@ function openReviseSalary(empId){
     ORG.ctcPolicy.basicPct = basicPct; // temporarily override for the preview calc only
     const r = deriveFromCTC(ctc, reimb);
     ORG.ctcPolicy.basicPct = savedPct; // restore — this override is per-revision, not persisted to Settings
+    lastCtcResult = r;
     const negWarn = r.otherAllowance < 0;
     document.getElementById('ctcPreview').innerHTML = `
       <div class="divider"></div>
@@ -2332,16 +2366,18 @@ function renderDocuments(c, actions){
     list = list.slice().sort((a,b)=>{ const oa=order[docStatus(a)], ob=order[docStatus(b)]; if(oa!==ob) return oa-ob; return (a.expiryDate||'9999').localeCompare(b.expiryDate||'9999'); });
     const wrap = document.getElementById('docTableWrap');
     if(!list.length){ wrap.innerHTML = '<div class="empty"><div class="icon">📄</div>No documents found.<div class="cta"><button class="btn" id="emptyAddDoc">+ Add Document</button></div></div>'; document.getElementById('emptyAddDoc').onclick=()=>openDocForm(); return; }
-    wrap.innerHTML = `<table><thead><tr><th>Document</th><th>Category</th><th>Cert / Policy #</th><th>Holder</th><th>Expiry</th><th>Status</th><th></th></tr></thead><tbody>
+    wrap.innerHTML = `<table><thead><tr><th>Document</th><th>Category</th><th>Cert / Policy #</th><th>Holder</th><th>Expiry</th><th>Files</th><th>Status</th><th></th></tr></thead><tbody>
       ${list.map(d=>{
         const s = docStatus(d); const days = docDaysToExpiry(d);
         const pillClass = s==='Valid'?'good':s==='Expiring'?'warn':s==='Expired'?'bad':'neutral';
+        const hasFiles = (d.attachments||[]).length>0;
         return `<tr>
           <td><b>${esc(d.docName)}</b>${d.issuer?`<div style="color:var(--muted);font-size:11.5px;">${esc(d.issuer)}</div>`:''}</td>
           <td>${esc(d.docCategory)}${d.docCategory==='Insurance'&&d.insuranceType?`<div style="color:var(--muted);font-size:11.5px;">${esc(d.insuranceType)}</div>`:''}</td>
           <td>${esc(d.certNo||'—')}</td>
           <td>${d.holderType==='Staff'?('👤 '+esc(d.holderName||'—')):('🏢 '+esc(d.holderName||ORG.companyName))}</td>
           <td>${d.isLifetime?'—':esc(d.expiryDate||'—')}${(s==='Expiring'||s==='Expired')&&days!=null?`<div style="color:var(--muted);font-size:11.5px;">${days<0?Math.abs(days)+'d overdue':days+'d left'}</div>`:''}</td>
+          <td><span class="pill ${hasFiles?'good':'bad'}" title="${hasFiles?'Click to view':'No file attached'}" ${hasFiles?`data-viewdoc="${d.id}" style="cursor:pointer;"`:''}>📎 ${hasFiles?'✓':'✕'}</span></td>
           <td><span class="pill ${pillClass}">${s}</span>${(s==='Expiring'||s==='Expired')&&!d.renewalAck?` <button class="btn secondary sm" data-ack="${d.id}" title="Acknowledge — dismiss from the nav alert badge">Ack</button>`:''}</td>
           <td class="no-print" style="white-space:nowrap;"><button class="btn secondary sm" data-edit="${d.id}">Edit</button> <button class="btn danger sm" data-del="${d.id}">Delete</button></td>
         </tr>`;
@@ -2349,6 +2385,7 @@ function renderDocuments(c, actions){
     </tbody></table>`;
     wrap.querySelectorAll('[data-edit]').forEach(b=> b.onclick=()=>openDocForm(b.dataset.edit));
     wrap.querySelectorAll('[data-del]').forEach(b=> b.onclick=()=>deleteDoc(b.dataset.del));
+    wrap.querySelectorAll('[data-viewdoc]').forEach(b=> b.onclick=()=>viewDocAttachments(b.dataset.viewdoc));
     wrap.querySelectorAll('[data-ack]').forEach(b=> b.onclick=async ()=>{
       const d = COMPANY_DOCS.find(x=>x.id===b.dataset.ack); if(!d) return;
       d.renewalAck = true; tagRecord(d, false); await saveCompanyDocs(); updateDocBadge(); draw();
@@ -2463,6 +2500,19 @@ async function submitDocForm(ev, isEdit, d){
   if(isEdit){ const idx = COMPANY_DOCS.findIndex(x=>x.id===d.id); COMPANY_DOCS[idx]=rec; } else { COMPANY_DOCS.push(rec); }
   await saveCompanyDocs();
   closeModal(); toast(isEdit?'Document updated.':'Document added.'); updateDocBadge(); render();
+}
+function viewDocAttachments(docId){
+  const d = COMPANY_DOCS.find(x=>x.id===docId); if(!d) return;
+  const files = d.attachments||[];
+  if(!files.length){ toast('No file attached — add one via Edit.', true); return; }
+  if(files.length===1){ openAttachmentBlob(files[0]); return; }
+  openModal(`
+    <div class="modal-head"><h3>Attachments — ${esc(d.docName)}</h3><button class="modal-close" id="mClose">✕</button></div>
+    ${files.map(f=>attachmentChipHtml(f)).join('')}
+    <div class="btn-row"><button class="btn secondary" id="mCancel">Close</button></div>
+  `, true);
+  document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+  wireAttachmentButtons();
 }
 function deleteDoc(id){
   const d = COMPANY_DOCS.find(x=>x.id===id); if(!d) return;
