@@ -843,17 +843,14 @@ function deriveFromCTC(ctc, reimbursement){
   const basicForPf = ORG.applyPfCeiling ? Math.min(basic, ORG.pfCeiling||15000) : basic;
   const pfEmployee = Math.round(basicForPf*0.12);
   const pfEmployer = pfEmployee;
-  let pt = ptFor(ctc); // seed with a reasonable guess
-  let gross=0, otherAllowance=0;
-  for(let i=0;i<4;i++){
-    gross = ctc - pfEmployee - pfEmployer - pt - reimbursement;
-    otherAllowance = gross - basic - hra - childrenEducation - lta;
-    const nextPt = ptFor(gross);
-    if(nextPt===pt) break;
-    pt = nextPt;
-  }
+  // CTC = Gross + PF Employer + Reimbursement — confirmed against two independent real
+  // payslip/working examples. PF Employee and PT are deductions FROM Gross on the payslip,
+  // not additive components of CTC, so they're deliberately excluded here.
+  const gross = ctc - pfEmployer - reimbursement;
+  const otherAllowance = gross - basic - hra - childrenEducation - lta;
+  const pt = ptFor(gross); // informational here — the payslip itself computes PT off actual monthly gross
   return { basic, hra, childrenEducation, lta, otherAllowance, pfEmployee, pfEmployer, pt, reimbursement, gross,
-    ctcCheck: gross+pfEmployee+pfEmployer+pt+reimbursement };
+    ctcCheck: gross+pfEmployer+reimbursement };
 }
 
 function salaryFieldsHtml(s){
@@ -1010,7 +1007,14 @@ function openReviseSalary(empId){
   const s = currentSalary(e);
   const nextMonth = new Date().toISOString().slice(0,7);
   const baseRev = Number(e._rev)||0;
-  const currentCtc = grossOf(s) + (s.basic?Math.round((ORG.applyPfCeiling?Math.min(s.basic,ORG.pfCeiling||15000):s.basic)*0.12):0) + ptFor(grossOf(s)) + (s.reimbursement||0);
+  const pfEmployerNow = s.basic ? Math.round((ORG.applyPfCeiling?Math.min(s.basic,ORG.pfCeiling||15000):s.basic)*0.12) : 0;
+  const currentCtc = grossOf(s) + pfEmployerNow + (s.reimbursement||0);
+  // Every employee was set up with whatever % happened to work out manually at the time, so
+  // rather than defaulting everyone to one company-wide %, this starts from what THIS
+  // employee's own current structure implies — "Reset to Company Default" below switches to
+  // the standard % once you're ready to move them onto it.
+  const impliedBasicPct = (currentCtc>0 && s.basic) ? (s.basic/currentCtc*100) : (ORG.ctcPolicy.basicPct*100);
+  const companyDefaultPct = (ORG.ctcPolicy.basicPct*100).toFixed(2);
   openModal(`
     <div class="modal-head"><h3>Revise Salary — ${esc(e.name)}</h3><button class="modal-close" id="mClose">✕</button></div>
     <form id="reviseForm">
@@ -1027,7 +1031,10 @@ function openReviseSalary(empId){
         <div class="grid cols-3">
           <div class="field"><label>New CTC (₹/month)</label><input type="number" min="0" step="0.01" id="ctcInput" value="${Math.round(currentCtc)}"></div>
           <div class="field"><label>Reimbursement (₹/month)</label><input type="number" min="0" step="0.01" id="ctcReimb" value="${s.reimbursement||ORG.ctcPolicy.defaultReimbursement}"></div>
-          <div class="field"><label>Basic (% of CTC)</label><input type="number" min="1" max="99" step="0.01" id="ctcBasicPct" value="${(ORG.ctcPolicy.basicPct*100).toFixed(2)}"></div>
+          <div class="field"><label>Basic (% of CTC)</label>
+            <input type="number" min="1" max="99" step="0.0001" id="ctcBasicPct" value="${impliedBasicPct.toFixed(4)}">
+            <p class="hint" style="margin:4px 0 0;">Pre-filled from this employee's current structure. <a href="#" id="resetBasicPct">Use company default (${companyDefaultPct}%) instead</a></p>
+          </div>
         </div>
         <div id="ctcPreview"></div>
       </div>
@@ -1100,6 +1107,11 @@ function openReviseSalary(empId){
     `;
   }
   ['ctcInput','ctcReimb','ctcBasicPct'].forEach(id=> document.getElementById(id).addEventListener('input', renderCtcPreview));
+  document.getElementById('resetBasicPct').onclick = (ev)=>{
+    ev.preventDefault();
+    document.getElementById('ctcBasicPct').value = (ORG.ctcPolicy.basicPct*100).toFixed(4);
+    renderCtcPreview();
+  };
   renderCtcPreview();
 
   document.getElementById('reviseForm').onsubmit = async (ev)=>{
