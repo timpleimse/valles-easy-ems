@@ -136,6 +136,7 @@
   .overlay.show{display:flex;}
   .modal{background:var(--card);border-radius:14px;width:100%;max-width:640px;padding:24px;box-shadow:0 20px 50px rgba(20,30,50,.25);}
   .modal.wide{max-width:840px;}
+  .modal.xwide{max-width:min(1320px, 95vw);}
   .modal-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;}
   .modal-head h3{font-size:18px;margin:0;font-weight:800;}
   .modal-close{background:none;border:none;font-size:20px;color:var(--muted);padding:4px 8px;border-radius:6px;}
@@ -405,6 +406,10 @@ const DEFAULT_ORG = {
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,8); }
 function money(n){ n = Number(n)||0; return "₹" + n.toLocaleString('en-IN', {maximumFractionDigits:0}); }
 function money2(n){ n = Number(n)||0; return "₹" + n.toLocaleString('en-IN', {maximumFractionDigits:2}); }
+/* No symbol — for wherever a currency symbol is explicitly prepended already (multi-currency
+   transactions), since money()/money2() always hardcode a rupee symbol regardless of actual
+   currency and would double up with it otherwise. */
+function moneyPlain2(n){ n = Number(n)||0; return n.toLocaleString('en-IN', {maximumFractionDigits:2}); }
 function timeAgo(iso){
   const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime())/1000));
   if(s < 60) return 'just now';
@@ -448,14 +453,20 @@ function integerToIndianWords(n){
   if(rest)  parts.push(threeDigitWords(rest));
   return parts.join(' ');
 }
-function rupeesInWords(amount){
+const CURRENCY_WORDS = {
+  INR:{major:'Rupees', minor:'Paise'}, USD:{major:'US Dollars', minor:'Cents'},
+  EUR:{major:'Euros', minor:'Cents'}, GBP:{major:'Pounds Sterling', minor:'Pence'}, SGD:{major:'Singapore Dollars', minor:'Cents'}
+};
+function amountInWords(amount, currency){
+  const names = CURRENCY_WORDS[currency] || CURRENCY_WORDS.INR;
   const n = Math.abs(Number(amount)||0);
-  const rupees = Math.floor(n);
-  const paise = Math.round((n - rupees) * 100);
-  let out = 'Rupees ' + integerToIndianWords(rupees);
-  if(paise > 0) out += ' and ' + twoDigitWords(paise) + ' Paise';
+  const major = Math.floor(n);
+  const minor = Math.round((n - major) * 100);
+  let out = names.major + ' ' + integerToIndianWords(major);
+  if(minor > 0) out += ' and ' + twoDigitWords(minor) + ' ' + names.minor;
   return out + ' Only';
 }
+function rupeesInWords(amount){ return amountInWords(amount, 'INR'); }
 function toast(msg, isErr){
   const wrap = document.getElementById('toastWrap');
   const t = document.createElement('div'); t.className = 'toast'+(isErr?' err':''); t.textContent = msg;
@@ -599,8 +610,9 @@ function setTab(tab){
 }
 
 /* ============================= MODAL ============================= */
-function openModal(html, wide){
-  document.getElementById('modalBox').className = 'modal' + (wide?' wide':'');
+function openModal(html, size){
+  const cls = size===true ? 'wide' : (size||'');
+  document.getElementById('modalBox').className = 'modal' + (cls?' '+cls:'');
   document.getElementById('modalBox').innerHTML = html;
   document.getElementById('overlay').classList.add('show');
 }
@@ -2760,7 +2772,7 @@ function renderTransactions(c, actions){
           <td>${esc(t.partyName||'—')}</td>
           <td>${esc(t.txnDate||'—')}</td>
           <td class="num-cell">
-            <div><b>${t.currency&&t.currency!=='INR'?(CURRENCY_SYMBOLS[t.currency]||''):'₹'}${money2(tot.grandTotal)}</b>${t.currency&&t.currency!=='INR'?` <span class="pill neutral">${esc(t.currency)}</span>`:''}</div>
+            <div><b>${t.currency&&t.currency!=='INR'?`${CURRENCY_SYMBOLS[t.currency]||''}${moneyPlain2(tot.grandTotal)}`:money2(tot.grandTotal)}</b>${t.currency&&t.currency!=='INR'?` <span class="pill neutral">${esc(t.currency)}</span>`:''}</div>
             ${t.currency&&t.currency!=='INR'?`<div style="color:var(--muted);font-size:11px;">≈ ${money(tot.grandTotalINR)}</div>`:''}
           </td>
           <td>${txnStatusPill(t.status)}</td>
@@ -2847,7 +2859,7 @@ function openTxnForm(txnId, prefill){
       </div>
       <div class="btn-row"><button type="submit" class="btn">Save Transaction</button><button type="button" class="btn secondary" id="mCancel">Cancel</button></div>
     </form>
-  `, true);
+  `, 'xwide');
   document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
 
   function statusOptionsFor(cat){
@@ -2922,7 +2934,7 @@ function openTxnForm(txnId, prefill){
       <div style="overflow-x:auto;">
       <table class="lineitem-table"><thead><tr>
         <th style="width:34px;">#</th><th style="min-width:220px;">Description</th><th style="width:90px;">HSN Code</th>
-        <th style="width:90px;">Qty</th><th style="width:110px;">UOM</th><th style="width:110px;">Cost/Unit</th>
+        <th style="width:90px;">Qty</th><th style="width:130px;">UOM</th><th style="width:110px;">Cost/Unit</th>
         <th style="width:80px;">Discount%</th><th style="width:110px;">Taxable Amt</th>
         <th style="width:70px;">SGST%</th><th style="width:70px;">CGST%</th><th style="width:70px;">IGST%</th>
         <th style="width:110px;">Total</th><th style="width:34px;"></th>
@@ -3007,10 +3019,10 @@ function openTxnForm(txnId, prefill){
     document.getElementById('txnTotalsPreview').innerHTML = `
       <div class="divider"></div>
       <div class="grid cols-4">
-        <div><label>Subtotal</label><div><b>${sym}${money2(tot.subtotal)}</b></div></div>
-        ${gstMode==='Intra'?`<div><label>CGST</label><div>${sym}${money2(tot.cgst)}</div></div><div><label>SGST</label><div>${sym}${money2(tot.sgst)}</div></div>`:''}
-        ${gstMode==='Inter'?`<div><label>IGST</label><div>${sym}${money2(tot.igst)}</div></div>`:''}
-        <div><label>Grand Total</label><div><b>${sym}${money2(tot.grandTotal)}</b></div></div>
+        <div><label>Subtotal</label><div><b>${sym}${moneyPlain2(tot.subtotal)}</b></div></div>
+        ${gstMode==='Intra'?`<div><label>CGST</label><div>${sym}${moneyPlain2(tot.cgst)}</div></div><div><label>SGST</label><div>${sym}${moneyPlain2(tot.sgst)}</div></div>`:''}
+        ${gstMode==='Inter'?`<div><label>IGST</label><div>${sym}${moneyPlain2(tot.igst)}</div></div>`:''}
+        <div><label>Grand Total</label><div><b>${sym}${moneyPlain2(tot.grandTotal)}</b></div></div>
       </div>
       ${currency!=='INR' ? `<div class="hint" style="margin-top:6px;">Grand Total in INR (at ${exchRate}): <b>${money2(tot.grandTotalINR)}</b></div>` : ''}`;
   }
@@ -3363,13 +3375,12 @@ function openTxnPrint(id){
         </table>
         <table class="pstable items-table" style="margin-top:-1px;">
           <tr class="earnhead"><td>DESCRIPTION</td><td>HSN</td><td>QTY</td><td>UOM</td><td>COST/UNIT</td><td>DISC%</td><td>GST%</td><td class="amtcell">TAXABLE AMT</td></tr>
-          ${(t.items||[]).map(li=>{ const effGstPct = t.gstMode==='None' ? 0 : (Number(li.gstPct)||0); return `<tr><td class="val" style="white-space:pre-wrap;">${esc(li.description)}</td><td class="val">${esc(li.hsn||'—')}</td><td class="val">${li.qty}</td><td class="val">${esc(li.uom||'NOS')}</td><td class="val amtcell">${sym}${money2(li.rate)}</td><td class="val">${li.discountPct||0}%</td><td class="val">${effGstPct}%</td><td class="val amtcell">${sym}${money2(calcLineAmount(li))}</td></tr>`; }).join('')}
-          <tr class="totrow"><td colspan="7">SUBTOTAL</td><td class="amtcell">${sym}${money2(tot.subtotal)}</td></tr>
-          ${t.gstMode==='Intra'?`<tr><td colspan="7">CGST</td><td class="amtcell">${sym}${money2(tot.cgst)}</td></tr><tr><td colspan="7">SGST</td><td class="amtcell">${sym}${money2(tot.sgst)}</td></tr>`:''}
-          ${t.gstMode==='Inter'?`<tr><td colspan="7">IGST</td><td class="amtcell">${sym}${money2(tot.igst)}</td></tr>`:''}
-          <tr class="netrow"><td colspan="7">GRAND TOTAL</td><td class="amtcell">${sym}${money2(tot.grandTotal)}</td></tr>
-          ${isForeign ? `<tr><td colspan="7">GRAND TOTAL (INR EQUIVALENT @ ${t.exchRate})</td><td class="amtcell">₹${money2(tot.grandTotalINR)}</td></tr>` : ''}
-          <tr class="wordsrow"><td colspan="8"><span class="wlabel">Amount in words${isForeign?' (INR equivalent)':''}:</span> ${esc(rupeesInWords(isForeign?tot.grandTotalINR:tot.grandTotal))}</td></tr>
+          ${(t.items||[]).map(li=>{ const effGstPct = t.gstMode==='None' ? 0 : (Number(li.gstPct)||0); return `<tr><td class="val" style="white-space:pre-wrap;">${esc(li.description)}</td><td class="val">${esc(li.hsn||'—')}</td><td class="val">${li.qty}</td><td class="val">${esc(li.uom||'NOS')}</td><td class="val amtcell">${sym}${moneyPlain2(li.rate)}</td><td class="val">${li.discountPct||0}%</td><td class="val">${effGstPct}%</td><td class="val amtcell">${sym}${moneyPlain2(calcLineAmount(li))}</td></tr>`; }).join('')}
+          <tr class="totrow"><td colspan="7">SUBTOTAL</td><td class="amtcell">${sym}${moneyPlain2(tot.subtotal)}</td></tr>
+          ${t.gstMode==='Intra'?`<tr><td colspan="7">CGST</td><td class="amtcell">${sym}${moneyPlain2(tot.cgst)}</td></tr><tr><td colspan="7">SGST</td><td class="amtcell">${sym}${moneyPlain2(tot.sgst)}</td></tr>`:''}
+          ${t.gstMode==='Inter'?`<tr><td colspan="7">IGST</td><td class="amtcell">${sym}${moneyPlain2(tot.igst)}</td></tr>`:''}
+          <tr class="netrow"><td colspan="7">GRAND TOTAL</td><td class="amtcell">${sym}${moneyPlain2(tot.grandTotal)}</td></tr>
+          <tr class="wordsrow"><td colspan="8"><span class="wlabel">Amount in words:</span> ${esc(amountInWords(tot.grandTotal, t.currency||'INR'))}</td></tr>
         </table>
         ${t.terms?`<div class="regime-note"><b>Terms &amp; Conditions:</b> ${esc(t.terms)}</div>`:''}
         ${t.notes?`<div class="regime-note"><b>Notes:</b> ${esc(t.notes)}</div>`:''}
