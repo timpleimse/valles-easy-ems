@@ -181,17 +181,25 @@
   .payslip-foot{font-size:10.5px;color:var(--muted);padding-top:10px;display:flex;justify-content:space-between;}
   .pstable tr.wordsrow td{font-size:11px;padding:8px 9px;font-style:italic;color:var(--ink-soft);background:#FAFBFD;}
   .pstable tr.wordsrow .wlabel{font-weight:800;font-style:normal;text-transform:uppercase;letter-spacing:.05em;font-size:10px;color:var(--ink);}
+  /* The many-column line-items table shares .pstable/.val with the 4-column detail grid
+     above it, but a 31%-per-cell width (correct for 4 columns) causes severe overflow across
+     8 columns — this resets it to fit the table's actual content instead. */
+  .items-table{table-layout:auto;}
+  .items-table td.val{width:auto;font-weight:600;font-size:10.5px;padding:4px 6px;}
+  .items-table td.lbl{width:auto;}
   .regime-note{font-size:10px;color:var(--muted);margin-top:10px;line-height:1.6;border-top:1px dashed var(--rule);padding-top:8px;}
 
   .app-footer{margin:34px 0 8px;padding-top:16px;border-top:1px solid var(--rule);text-align:center;font-size:11.5px;color:var(--muted);line-height:1.9;}
   .app-footer div:first-child{font-weight:600;color:var(--ink-soft);}
 
   @media print{
+    @page{ size:A4; margin:10mm; }
     body *{visibility:hidden;}
     #printArea, #printArea *{visibility:visible;}
     #printArea{position:absolute;left:0;top:0;width:100%;padding:0;margin:0;}
     #printArea img{display:block !important;}
     .payslip, .payslip *{-webkit-print-color-adjust:exact !important;print-color-adjust:exact !important;}
+    .items-table{font-size:9.5px;}
     .no-print{display:none !important;}
   }
 </style>
@@ -219,7 +227,8 @@
       <button class="nav-item" data-tab="backup"><span class="ic">📦</span>Backup</button>
       <button class="nav-item" data-tab="settings"><span class="ic">🔒</span>Settings</button>
     </nav>
-    <div id="navDriveBadge" class="no-print" style="margin-left:auto;padding-left:12px;white-space:nowrap;"></div>
+    <div id="navPresenceBadge" class="no-print" style="margin-left:auto;padding-left:8px;white-space:nowrap;"></div>
+    <div id="navDriveBadge" class="no-print" style="padding-left:12px;white-space:nowrap;"></div>
   </div>
 </div>
 
@@ -268,6 +277,7 @@ function ensureLocal(){
   }
   if(!LOCAL.compliance) LOCAL.compliance = {};
   if(!LOCAL.tombstones) LOCAL.tombstones = {};
+  if(!LOCAL.presence) LOCAL.presence = {};
   return LOCAL;
 }
 function recordTombstone(kind, id){
@@ -308,7 +318,8 @@ function buildPayload(){
   ensureLocal();
   return { app:'Valles EASY EMS', version:2, savedAt:new Date().toISOString(),
     org:ORG, employees:EMPLOYEES, payslips:PAYSLIPS, compliance:COMPLIANCE,
-    parties:PARTIES, documents:COMPANY_DOCS, transactions:TRANSACTIONS, expenses:EXPENSES, tombstones:LOCAL.tombstones };
+    parties:PARTIES, documents:COMPANY_DOCS, transactions:TRANSACTIONS, expenses:EXPENSES,
+    presence:LOCAL.presence, tombstones:LOCAL.tombstones };
 }
 
 /* ============================= STATE ============================= */
@@ -606,6 +617,7 @@ document.getElementById('overlay').addEventListener('click', (e)=>{ if(e.target.
 function render(){
   const c = document.getElementById('content'); const actions = document.getElementById('topActions'); actions.innerHTML='';
   updateDriveStatusUI();
+  renderPresenceBadge();
   if(activeTab==='dashboard') return renderDashboard(c, actions);
   if(activeTab==='employees') return renderEmployees(c, actions);
   if(activeTab==='payslips') return renderPayslips(c, actions);
@@ -1739,7 +1751,7 @@ function initGis(){
       toast('Google Drive connected.');
       ensureStaffName();
       try{ const waitingOnUser = await driveReconcileOnConnect(); if(!waitingOnUser) await driveSyncNow(); }catch(e){}
-      startAutoSyncLoop();
+      startAutoSyncLoop(); startPresenceLoop();
       if(activeTab==='settings') renderSettings(document.getElementById('content'), document.getElementById('tabActions'));
     }
   });
@@ -1943,6 +1955,50 @@ function startAutoSyncLoop(){
   if(driveAutoInterval) return;
   driveAutoInterval = setInterval(()=>{ if(ORG.gdrive && ORG.gdrive.connected) driveSyncNow(); updateDriveStatusUI(); }, 20000);
 }
+/* Multi-user presence: each device stamps its own staff name with the current time, synced
+   alongside everything else. Other devices merge these in on every sync (own timestamp
+   always wins for ourselves, so a stale remote value can't override a heartbeat we just
+   sent). This is Drive-sync-based, not truly real-time — expect up to ~20-60s lag before
+   someone shows as online or goes offline, not instant. */
+function updatePresenceHeartbeat(){
+  const name = currentStaffName();
+  if(!name) return;
+  ensureLocal();
+  LOCAL.presence[name] = new Date().toISOString();
+  try{ localStorage.setItem(LS_KEY, JSON.stringify(LOCAL)); }catch(e){}
+}
+function mergePresenceFrom(remotePresence){
+  if(!remotePresence) return;
+  ensureLocal();
+  const mySelf = currentStaffName();
+  Object.entries(remotePresence).forEach(([name,ts])=>{
+    if(name===mySelf) return; // never let a stale remote value override our own fresh heartbeat
+    if(!LOCAL.presence[name] || new Date(ts) > new Date(LOCAL.presence[name])) LOCAL.presence[name] = ts;
+  });
+  try{ localStorage.setItem(LS_KEY, JSON.stringify(LOCAL)); }catch(e){}
+}
+let presenceLoopStarted = false;
+function startPresenceLoop(){
+  if(presenceLoopStarted) return;
+  presenceLoopStarted = true;
+  updatePresenceHeartbeat();
+  setInterval(()=>{
+    updatePresenceHeartbeat();
+    if(ORG.gdrive && ORG.gdrive.connected){ driveDirty = true; driveSyncNow(); }
+    renderPresenceBadge();
+  }, 60000);
+}
+function renderPresenceBadge(){
+  const el = document.getElementById('navPresenceBadge');
+  if(!el) return;
+  ensureLocal();
+  const now = Date.now();
+  const mySelf = currentStaffName();
+  const others = Object.entries(LOCAL.presence||{})
+    .filter(([name,ts])=> name!==mySelf && (now-new Date(ts).getTime())<90000)
+    .map(([name])=>name);
+  el.innerHTML = others.length ? `<span class="pill accent" title="${esc(others.join(', '))}">🟢 ${others.length} other${others.length>1?'s':''} online</span>` : '';
+}
 async function driveSyncNow(){
   if(!driveConnected() || driveBusy || !ORG.gdrive.connected || reconcilePending) return;
   if(!driveDirty){ updateDriveStatusUI(); return; }
@@ -1950,6 +2006,8 @@ async function driveSyncNow(){
   try{
     if(!ORG.gdrive.folderId) await driveSetup();
     await driveEnsureDataFile();
+    const remoteBefore = await pullRemotePayload();
+    mergePresenceFrom(remoteBefore && remoteBefore.presence);
     const result = await driveUploadJson('data.json', ORG.gdrive.folderId, buildPayload(), ORG.gdrive.fileId);
     if(result && result.id){ ORG.gdrive.fileId = result.id; ORG.gdrive.lastSynced = new Date().toISOString(); driveLastError = null; await saveOrgSilent(); }
     try{ await driveExportSheet(true); driveLastError = null; }
@@ -1958,6 +2016,7 @@ async function driveSyncNow(){
   }catch(e){ driveLastError = e.message; console.warn('Drive sync failed:', e.message); }
   driveBusy = false;
   updateDriveStatusUI();
+  renderPresenceBadge();
 }
 function updateDriveStatusUI(){
   const el = document.getElementById('driveLastSync');
@@ -2584,10 +2643,20 @@ function currentFYShort(){
 function nextTxnNo(category){
   const fy = currentFYShort();
   const key = category+'-'+fy;
-  const seq = ORG.txnSeq[key]||1;
-  ORG.txnSeq[key] = seq+1;
   const prefix = (ORG.txnPrefixes && ORG.txnPrefixes[category]) || TXN_CATEGORIES[category].prefix;
-  return `${prefix}${fy}${String(seq).padStart(3,'0')}`;
+  const stub = prefix+fy;
+  // Next number = (highest number still in use for this category+FY) + 1 — so deleting a
+  // record frees its number back up, rather than a counter that only ever climbs regardless
+  // of what's been deleted. The Settings "Next Sequence Number" field still acts as a floor
+  // if you ever want to deliberately skip ahead — it just no longer forces the number UP
+  // after a deletion the way the old counter-only approach did.
+  const existingNums = TRANSACTIONS
+    .filter(t=> t.txnCategory===category && t.txnNo && t.txnNo.indexOf(stub)===0)
+    .map(t=> parseInt(t.txnNo.slice(stub.length), 10))
+    .filter(n=> !isNaN(n));
+  const derivedNext = existingNums.length ? Math.max(...existingNums)+1 : 1;
+  const seq = Math.max(derivedNext, ORG.txnSeq[key]||1);
+  return `${stub}${String(seq).padStart(3,'0')}`;
 }
 /* Lets Cost/Unit accept a typed formula like Excel — "100*5", "(200+50)/2" — evaluated on
    leaving the field. Whitelists to digits/operators/parentheses/decimal points only before
@@ -2830,8 +2899,8 @@ function openTxnForm(txnId, prefill){
     document.getElementById('lineItemsWrap').innerHTML = `
       <div style="overflow-x:auto;">
       <table class="lineitem-table"><thead><tr>
-        <th style="width:34px;">#</th><th style="min-width:180px;">Description</th><th style="width:90px;">HSN Code</th>
-        <th style="width:70px;">Qty</th><th style="width:80px;">UOM</th><th style="width:100px;">Cost/Unit</th>
+        <th style="width:34px;">#</th><th style="min-width:220px;">Description</th><th style="width:90px;">HSN Code</th>
+        <th style="width:90px;">Qty</th><th style="width:90px;">UOM</th><th style="width:110px;">Cost/Unit</th>
         <th style="width:80px;">Discount%</th><th style="width:110px;">Taxable Amt</th>
         <th style="width:70px;">SGST%</th><th style="width:70px;">CGST%</th><th style="width:70px;">IGST%</th>
         <th style="width:110px;">Total</th><th style="width:34px;"></th>
@@ -2845,9 +2914,9 @@ function openTxnForm(txnId, prefill){
         const lineTotal = taxable * (1 + (gstMode==='None'?0:gstPct)/100);
         return `<tr data-line="${i}">
           <td class="num-cell">${i+1}</td>
-          <td><input type="text" data-li="description" value="${esc(li.description)}" placeholder="Description"></td>
+          <td><textarea data-li="description" rows="2" style="resize:vertical;white-space:pre-wrap;min-height:38px;" placeholder="Description">${esc(li.description)}</textarea></td>
           <td><input type="text" data-li="hsn" value="${esc(li.hsn)}" placeholder="HSN"></td>
-          <td><input type="number" min="0" step="0.01" data-li="qty" value="${li.qty}"></td>
+          <td><input type="number" min="0" step="0.01" data-li="qty" value="${li.qty}" style="min-width:80px;"></td>
           <td><select data-li="uom">${UOM_OPTIONS.map(u=>`<option ${li.uom===u?'selected':''}>${u}</option>`).join('')}</select></td>
           <td><input type="text" inputmode="decimal" data-li="rate" data-formula="1" value="${li.rate}" placeholder="e.g. 100*5" title="Accepts a formula like 100*5 or (200+50)/2 — evaluates when you leave the field"></td>
           <td><input type="number" min="0" max="100" step="0.01" data-li="discountPct" value="${li.discountPct||0}"></td>
@@ -2878,6 +2947,17 @@ function openTxnForm(txnId, prefill){
         });
         return;
       }
+      if(inp.dataset.li==='description' || inp.dataset.li==='hsn'){
+        // Also blur-triggered — Description can be a long multi-line paragraph (as in real
+        // invoices), and rebuilding the table after every keystroke would lose cursor
+        // position and make typing it out nearly unusable.
+        const field = inp.dataset.li;
+        inp.addEventListener('blur', ()=>{
+          const idx = Number(inp.closest('[data-line]').dataset.line);
+          txnLineItems[idx][field] = inp.value;
+        });
+        return;
+      }
       inp.addEventListener('input', ()=>{
         const idx = Number(inp.closest('[data-line]').dataset.line);
         const field = inp.dataset.li;
@@ -2885,8 +2965,6 @@ function openTxnForm(txnId, prefill){
           // Editing the SGST% column (Intra-state) sets the line's overall GST% to double it,
           // since CGST always mirrors SGST and together they make up the full rate.
           txnLineItems[idx].gstPct = (Number(inp.value)||0)*2;
-        } else if(field==='description' || field==='hsn'){
-          txnLineItems[idx][field] = inp.value;
         } else if(field==='uom'){
           txnLineItems[idx].uom = inp.value;
         } else {
@@ -3261,9 +3339,9 @@ function openTxnPrint(id){
           ${party?`<tr><td class="lbl">PARTY GST / PAN</td><td class="val">${esc(party.gstNumber||'—')} / ${esc(party.panNumber||'—')}</td><td class="lbl">PARTY ADDRESS</td><td class="val" style="white-space:pre-wrap;">${esc(party.address||'—')}</td></tr>`:''}
           ${detailRows.map(r=>`<tr><td class="lbl">${esc(r[0])}</td><td class="val">${esc(r[1]||'—')}</td><td class="lbl">${esc(r[2])}</td><td class="val">${esc(r[3]||'—')}</td></tr>`).join('')}
         </table>
-        <table class="pstable" style="margin-top:-1px;">
+        <table class="pstable items-table" style="margin-top:-1px;">
           <tr class="earnhead"><td>DESCRIPTION</td><td>HSN</td><td>QTY</td><td>UOM</td><td>COST/UNIT</td><td>DISC%</td><td>GST%</td><td class="amtcell">TAXABLE AMT</td></tr>
-          ${(t.items||[]).map(li=>`<tr><td class="val">${esc(li.description)}</td><td class="val">${esc(li.hsn||'—')}</td><td class="val">${li.qty}</td><td class="val">${esc(li.uom||'NOS')}</td><td class="val amtcell">${sym}${money2(li.rate)}</td><td class="val">${li.discountPct||0}%</td><td class="val">${li.gstPct}%</td><td class="val amtcell">${sym}${money2(calcLineAmount(li))}</td></tr>`).join('')}
+          ${(t.items||[]).map(li=>{ const effGstPct = t.gstMode==='None' ? 0 : (Number(li.gstPct)||0); return `<tr><td class="val" style="white-space:pre-wrap;">${esc(li.description)}</td><td class="val">${esc(li.hsn||'—')}</td><td class="val">${li.qty}</td><td class="val">${esc(li.uom||'NOS')}</td><td class="val amtcell">${sym}${money2(li.rate)}</td><td class="val">${li.discountPct||0}%</td><td class="val">${effGstPct}%</td><td class="val amtcell">${sym}${money2(calcLineAmount(li))}</td></tr>`; }).join('')}
           <tr class="totrow"><td colspan="7">SUBTOTAL</td><td class="amtcell">${sym}${money2(tot.subtotal)}</td></tr>
           ${t.gstMode==='Intra'?`<tr><td colspan="7">CGST</td><td class="amtcell">${sym}${money2(tot.cgst)}</td></tr><tr><td colspan="7">SGST</td><td class="amtcell">${sym}${money2(tot.sgst)}</td></tr>`:''}
           ${t.gstMode==='Inter'?`<tr><td colspan="7">IGST</td><td class="amtcell">${sym}${money2(tot.igst)}</td></tr>`:''}
@@ -4057,8 +4135,12 @@ function renderSettings(c, actions){
       <div class="grid cols-3">
         ${Object.entries(TXN_CATEGORIES).map(([k,v])=>`<div class="field"><label>${v.label}</label><input type="text" maxlength="4" data-prefix="${k}" value="${esc(ORG.txnPrefixes[k]||v.prefix)}" style="text-transform:uppercase;"></div>`).join('')}
       </div>
+      <div class="section-label" style="margin-top:14px;">Next Sequence Number, This FY (${currentFYShort()})</div>
+      <p class="hint" style="margin:-4px 0 8px;">Numbering never reuses a number once issued — deleting a transaction doesn't lower this automatically, since a printed/sent document might already be in someone's hands. If you deleted test records that were never actually sent anywhere, correct the number here.</p>
+      <div class="grid cols-3">
+        ${Object.entries(TXN_CATEGORIES).map(([k,v])=>{ const fy=currentFYShort(); const prefix=ORG.txnPrefixes[k]||v.prefix; const seq=ORG.txnSeq[k+'-'+fy]||1; return `<div class="field"><label>${v.label} <span style="font-weight:400;color:var(--muted);">(${prefix}${fy}###)</span></label><input type="number" min="1" step="1" data-seq="${k}" value="${seq}"></div>`; }).join('')}
+      </div>
       <div class="btn-row"><button class="btn secondary sm" id="saveTxnSettings">Save</button></div>
-      <p class="hint" style="margin-top:10px;">Next transaction numbers: ${Object.entries(TXN_CATEGORIES).map(([k,v])=>{ const fy=currentFYShort(); const prefix=ORG.txnPrefixes[k]||v.prefix; const seq=ORG.txnSeq[k+'-'+fy]||1; return `${v.label} ${prefix}${fy}${String(seq).padStart(3,'0')}`; }).join(' · ')}</p>
     </div>
 
     <div class="card">
@@ -4217,6 +4299,11 @@ function renderSettings(c, actions){
     document.querySelectorAll('[data-prefix]').forEach(inp=>{
       const v = inp.value.trim().toUpperCase();
       if(v) ORG.txnPrefixes[inp.dataset.prefix] = v;
+    });
+    const fy = currentFYShort();
+    document.querySelectorAll('[data-seq]').forEach(inp=>{
+      const v = Math.max(1, Number(inp.value)||1);
+      ORG.txnSeq[inp.dataset.seq+'-'+fy] = v;
     });
     await saveOrg(); toast('Transaction settings saved.'); renderSettings(c,actions);
   };
@@ -4397,7 +4484,7 @@ function renderSettings(c, actions){
   updateCompBadge();
   updateDocBadge();
   setTab('dashboard');
-  if(ORG.gdrive && ORG.gdrive.connected){ attemptSilentDriveReconnect(); startAutoSyncLoop(); ensureStaffName(); }
+  if(ORG.gdrive && ORG.gdrive.connected){ attemptSilentDriveReconnect(); startAutoSyncLoop(); startPresenceLoop(); ensureStaffName(); }
 })();
 </script>
 </body>
