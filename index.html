@@ -107,6 +107,8 @@
 
   table{width:100%;border-collapse:collapse;font-size:13px;}
   .lineitem-table{font-size:12px;}
+  .txn-list-table td{vertical-align:top;padding-top:10px;padding-bottom:10px;}
+  .txn-list-table .pill{margin-top:2px;display:inline-block;}
   .lineitem-table th{padding:4px 6px;text-align:left;color:var(--muted);font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:.03em;border-bottom:1px solid var(--rule);white-space:nowrap;}
   .lineitem-table td{padding:3px 4px;vertical-align:middle;}
   .lineitem-table input, .lineitem-table select{width:100%;padding:5px 6px;font-size:12px;border:1px solid var(--rule);border-radius:6px;background:var(--card);}
@@ -2740,18 +2742,38 @@ function renderTransactions(c, actions){
     wrap.innerHTML = Object.keys(TXN_CATEGORIES).filter(k=>groups[k]).map(k=>{
       const list = groups[k].slice().sort((a,b)=> (b.txnDate||'').localeCompare(a.txnDate||''));
       return `<div class="section-label" style="margin-top:16px;">${TXN_CATEGORIES[k].label} (${list.length})</div>
-      <table><thead><tr><th>Txn No.</th><th>Party</th><th>Date</th><th class="num-cell">Amount</th><th>Status</th><th></th></tr></thead><tbody>
-        ${list.map(t=>{ const tot = calcTxnTotals(t); return `<tr>
-          <td><b>${esc(t.txnNo)}</b>${t.revisionNo?` <span class="pill neutral">Rev-${t.revisionNo}</span>`:''}${t.linkedInvoice?` <span class="pill good" title="Converted to ${esc(t.linkedInvoice)}">→ ${esc(t.linkedInvoice)}</span>`:''}${(t.linkedInvoiceGST||t.linkedInvoiceNonGST)?` <span class="pill good" title="Consolidated: GST ${esc(t.linkedInvoiceGST||'—')}, Non-GST ${esc(t.linkedInvoiceNonGST||'—')}">→ ${esc(t.linkedInvoiceGST||'')} / ${esc(t.linkedInvoiceNonGST||'')}</span>`:''}${t.linkedProforma?` <span class="pill neutral" title="From proforma">from ${esc(t.linkedProforma)}</span>`:''}${(t.linkedProformas&&t.linkedProformas.length)?` <span class="pill neutral" title="Consolidated from ${esc(t.linkedProformas.join(', '))}">from ${t.linkedProformas.length} proforma(s)</span>`:''}</td>
-          <td>${esc(t.partyName||'—')}</td><td>${esc(t.txnDate||'—')}</td>
-          <td class="num-cell">${t.currency&&t.currency!=='INR'?`${CURRENCY_SYMBOLS[t.currency]||''}${money2(tot.grandTotal)} <span class="pill neutral">${esc(t.currency)}</span><div style="color:var(--muted);font-size:11px;">${money(tot.grandTotalINR)}</div>`:money(tot.grandTotal)}</td><td>${txnStatusPill(t.status)}</td>
-          <td class="no-print" style="white-space:nowrap;">
-            <button class="btn secondary sm" data-view="${t.id}">View / Print</button>
-            <button class="btn secondary sm" data-edit="${t.id}">Edit</button>
-            ${k==='PROFORMA' && !t.linkedInvoice && !t.linkedInvoiceGST && !t.linkedInvoiceNonGST ? `<button class="btn sm" data-convert="${t.id}">Convert to Invoice</button>` : ''}
-            <button class="btn danger sm" data-del="${t.id}">Delete</button>
+      <div style="overflow-x:auto;">
+      <table class="txn-list-table"><thead><tr>
+        <th style="width:150px;">Txn No.</th><th>Party</th><th style="width:100px;">Date</th>
+        <th class="num-cell" style="width:150px;">Amount</th><th style="width:110px;">Status</th><th style="width:260px;"></th>
+      </tr></thead><tbody>
+        ${list.map(t=>{ const tot = calcTxnTotals(t);
+          const badges = [
+            t.revisionNo ? `<span class="pill neutral">Rev-${t.revisionNo}</span>` : '',
+            t.linkedInvoice ? `<span class="pill good" title="Converted to ${esc(t.linkedInvoice)}">→ ${esc(t.linkedInvoice)}</span>` : '',
+            (t.linkedInvoiceGST||t.linkedInvoiceNonGST) ? `<span class="pill good" title="Consolidated: GST ${esc(t.linkedInvoiceGST||'—')}, Non-GST ${esc(t.linkedInvoiceNonGST||'—')}">→ ${esc(t.linkedInvoiceGST||'')} / ${esc(t.linkedInvoiceNonGST||'')}</span>` : '',
+            t.linkedProforma ? `<span class="pill neutral" title="From proforma">from ${esc(t.linkedProforma)}</span>` : '',
+            (t.linkedProformas&&t.linkedProformas.length) ? `<span class="pill neutral" title="Consolidated from ${esc(t.linkedProformas.join(', '))}">from ${t.linkedProformas.length} proforma(s)</span>` : ''
+          ].filter(Boolean).join(' ');
+          return `<tr>
+          <td><b>${esc(t.txnNo)}</b>${badges?`<div style="margin-top:3px;">${badges}</div>`:''}</td>
+          <td>${esc(t.partyName||'—')}</td>
+          <td>${esc(t.txnDate||'—')}</td>
+          <td class="num-cell">
+            <div><b>${t.currency&&t.currency!=='INR'?(CURRENCY_SYMBOLS[t.currency]||''):'₹'}${money2(tot.grandTotal)}</b>${t.currency&&t.currency!=='INR'?` <span class="pill neutral">${esc(t.currency)}</span>`:''}</div>
+            ${t.currency&&t.currency!=='INR'?`<div style="color:var(--muted);font-size:11px;">≈ ${money(tot.grandTotalINR)}</div>`:''}
+          </td>
+          <td>${txnStatusPill(t.status)}</td>
+          <td class="no-print">
+            <div style="display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end;">
+              <button class="btn secondary sm" data-view="${t.id}">View</button>
+              <button class="btn secondary sm" data-edit="${t.id}">Edit</button>
+              ${k==='PROFORMA' && !t.linkedInvoice && !t.linkedInvoiceGST && !t.linkedInvoiceNonGST ? `<button class="btn sm" data-convert="${t.id}">Convert</button>` : ''}
+              <button class="btn danger sm" data-del="${t.id}">Delete</button>
+            </div>
           </td></tr>`; }).join('')}
-      </tbody></table>`;
+      </tbody></table>
+      </div>`;
     }).join('');
     wrap.querySelectorAll('[data-view]').forEach(b=> b.onclick=()=>openTxnPrint(b.dataset.view));
     wrap.querySelectorAll('[data-edit]').forEach(b=> b.onclick=()=>openTxnForm(b.dataset.edit));
@@ -2900,7 +2922,7 @@ function openTxnForm(txnId, prefill){
       <div style="overflow-x:auto;">
       <table class="lineitem-table"><thead><tr>
         <th style="width:34px;">#</th><th style="min-width:220px;">Description</th><th style="width:90px;">HSN Code</th>
-        <th style="width:90px;">Qty</th><th style="width:90px;">UOM</th><th style="width:110px;">Cost/Unit</th>
+        <th style="width:90px;">Qty</th><th style="width:110px;">UOM</th><th style="width:110px;">Cost/Unit</th>
         <th style="width:80px;">Discount%</th><th style="width:110px;">Taxable Amt</th>
         <th style="width:70px;">SGST%</th><th style="width:70px;">CGST%</th><th style="width:70px;">IGST%</th>
         <th style="width:110px;">Total</th><th style="width:34px;"></th>
