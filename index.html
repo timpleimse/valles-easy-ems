@@ -106,6 +106,11 @@
   .btn-row{display:flex;gap:10px;flex-wrap:wrap;}
 
   table{width:100%;border-collapse:collapse;font-size:13px;}
+  .lineitem-table{font-size:12px;}
+  .lineitem-table th{padding:4px 6px;text-align:left;color:var(--muted);font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:.03em;border-bottom:1px solid var(--rule);white-space:nowrap;}
+  .lineitem-table td{padding:3px 4px;vertical-align:middle;}
+  .lineitem-table input, .lineitem-table select{width:100%;padding:5px 6px;font-size:12px;border:1px solid var(--rule);border-radius:6px;background:var(--card);}
+  .lineitem-table input:disabled{background:var(--bg);color:var(--muted);}
   thead th{
     text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);
     padding:8px 10px;border-bottom:1px solid var(--rule);
@@ -1966,10 +1971,21 @@ function updateDriveStatusUI(){
     if(!ORG.gdrive || !ORG.gdrive.connected) badge.innerHTML = '';
     else if(driveReconnecting) badge.innerHTML = `<span class="pill">🔄 Reconnecting…</span>`;
     else if(!driveConnected()) badge.innerHTML = `<span class="pill bad" style="cursor:pointer;" id="navDriveReconnect">⚠ Drive disconnected — click to reconnect</span>`;
-    else if(driveLastError) badge.innerHTML = `<span class="pill bad" title="${esc(driveLastError)}">⚠ Sync error</span>`;
-    else badge.innerHTML = `<span class="pill good">☁ Synced ${ORG.gdrive.lastSynced?timeAgo(ORG.gdrive.lastSynced):''}</span>`;
+    else {
+      const statusHtml = driveLastError
+        ? `<span class="pill bad" title="${esc(driveLastError)}">⚠ Sync error</span>`
+        : `<span class="pill good">☁ Synced ${ORG.gdrive.lastSynced?timeAgo(ORG.gdrive.lastSynced):''}</span>`;
+      badge.innerHTML = `${statusHtml} <button type="button" class="btn secondary sm" id="navSyncNowBtn" title="Sync now, regardless of whether anything's changed">🔄 Sync Now</button>`;
+    }
     const reconnectEl = document.getElementById('navDriveReconnect');
     if(reconnectEl) reconnectEl.onclick = connectDrive;
+    const syncNowEl = document.getElementById('navSyncNowBtn');
+    if(syncNowEl) syncNowEl.onclick = async ()=>{
+      syncNowEl.disabled = true; syncNowEl.textContent = 'Syncing…';
+      driveDirty = true; // manual sync always runs, regardless of the dirty-check
+      await driveSyncNow();
+      toast(driveLastError ? ('Sync failed: '+driveLastError) : 'Synced to Google Drive.', !!driveLastError);
+    };
   }
 }
 async function driveListBackups(){
@@ -2106,8 +2122,8 @@ async function driveExportSheet(silent){
     const docRows = [['Document Name','Category','Insurance Type','Cert/Policy No.','Issuer','Holder Type','Holder','Issue Date','Expiry Date','Lifetime','Status','Premium','Sum Insured','Files Attached']]
       .concat(COMPANY_DOCS.map(d=>[d.docName,d.docCategory,d.insuranceType,d.certNo,d.issuer,d.holderType,d.holderName,d.issueDate,d.expiryDate,d.isLifetime?'Yes':'No',docStatus(d),d.premiumAmount||0,d.sumInsured||0,(d.attachments||[]).length]));
 
-    const txnRows = [['Txn No.','Category','Direction','Party','Date','Due Date','Status','Reference','Subject','Subtotal','GST Mode','Tax Amount','Grand Total','Revision No.','Fund Received','Fund Received Date','Linked Invoice','Linked Proforma']]
-      .concat(TRANSACTIONS.map(t=>{ const tot = calcTxnTotals(t); return [t.txnNo,TXN_CATEGORIES[t.txnCategory]?TXN_CATEGORIES[t.txnCategory].label:t.txnCategory,t.txnDirection,t.partyName,t.txnDate,t.dueDate,t.status,(t.referenceType||'')+' '+(t.reference||''),t.subject,tot.subtotal,t.gstMode,tot.taxAmount,tot.grandTotal,t.revisionNo||0,t.fundReceivedAmount||'',t.fundReceivedDate||'',t.linkedInvoice||'',t.linkedProforma||'']; }));
+    const txnRows = [['Txn No.','Category','Direction','Party','Date','Due Date','Status','Reference','Subject','Currency','Exchange Rate','Subtotal','GST Mode','Tax Amount','Grand Total','Grand Total (INR)','Revision No.','Fund Received','Fund Received Date','Linked Invoice','Linked Proforma']]
+      .concat(TRANSACTIONS.map(t=>{ const tot = calcTxnTotals(t); return [t.txnNo,TXN_CATEGORIES[t.txnCategory]?TXN_CATEGORIES[t.txnCategory].label:t.txnCategory,t.txnDirection,t.partyName,t.txnDate,t.dueDate,t.status,(t.referenceType||'')+' '+(t.reference||''),t.subject,t.currency||'INR',t.exchRate||1,tot.subtotal,t.gstMode,tot.taxAmount,tot.grandTotal,tot.grandTotalINR,t.revisionNo||0,t.fundReceivedAmount||'',t.fundReceivedDate||'',t.linkedInvoice||'',t.linkedProforma||'']; }));
 
     const expRows = [['Voucher No.','Bill Type','Party','Bill No.','Bill Date','Due Date','Category','Currency','Amount (INR)','GST Mode','RCM','GST Amount','TDS Section','TDS Rate','TDS Amount','PF','PT','ESIC','Other Deduction','Net Payable','Paid','Balance','Status','Ledger Account','GSTR-2B Claim Month','Bill Attached','Receipt Attached','Payment Mode','Payment Reference','Date of Payment','Tally Voucher No.','Tally Voucher Date']]
       .concat(EXPENSES.map(e=>{ const tot = calcExpenseTotals(e); const sec = TDS_SECTION_BY_ID[e.tdsSectionId]; const ledger = (ORG.chartOfAccounts||[]).find(a=>a.id===e.ledgerAccountId);
@@ -2240,7 +2256,7 @@ function renderParties(c, actions){
     if(!list.length){ wrap.innerHTML = '<div class="empty"><div class="icon">🤝</div>No parties found.<div class="cta"><button class="btn" id="emptyAddParty">+ New Party</button></div></div>'; document.getElementById('emptyAddParty').onclick=()=>openPartyForm(); return; }
     wrap.innerHTML = `<table><thead><tr><th>Party Name</th><th>Type</th><th>Contact Person</th><th>Email</th><th>Mobile</th><th>GST No.</th><th>PAN No.</th><th></th></tr></thead><tbody>
       ${list.map(p=>`<tr>
-        <td><b>${esc(p.partyName)}</b>${p.address?`<div style="color:var(--muted);font-size:11.5px;">${esc(p.address)}</div>`:''}</td>
+        <td><b>${esc(p.partyName)}</b>${p.address?`<div style="color:var(--muted);font-size:11.5px;white-space:pre-wrap;">${esc(p.address)}</div>`:''}</td>
         <td><span class="pill ${p.partyType==='Client'?'accent':'neutral'}">${esc(p.partyType)}</span></td>
         <td>${esc(p.contactPerson||'—')}</td><td>${esc(p.email||'—')}</td><td>${esc(p.mobile||'—')}</td>
         <td>${esc(p.gstNumber||'—')}</td><td>${esc(p.panNumber||'—')}</td>
@@ -2275,7 +2291,7 @@ function openPartyForm(partyId){
       </div>
       <div class="grid cols-2">
         <div class="field"><label>PAN Number</label><input type="text" name="panNumber" value="${esc(p.panNumber)}"></div>
-        <div class="field"><label>Address</label><input type="text" name="address" value="${esc(p.address)}"></div>
+        <div class="field"><label>Address</label><textarea name="address" rows="3" style="resize:vertical;white-space:pre-wrap;">${esc(p.address)}</textarea></div>
       </div>
       <div class="btn-row"><button type="submit" class="btn">Save Party</button><button type="button" class="btn secondary" id="mCancel">Cancel</button></div>
     </form>
@@ -2573,8 +2589,27 @@ function nextTxnNo(category){
   const prefix = (ORG.txnPrefixes && ORG.txnPrefixes[category]) || TXN_CATEGORIES[category].prefix;
   return `${prefix}${fy}${String(seq).padStart(3,'0')}`;
 }
-function calcLineAmount(item){ return (Number(item.qty)||0) * (Number(item.rate)||0); }
+/* Lets Cost/Unit accept a typed formula like Excel — "100*5", "(200+50)/2" — evaluated on
+   leaving the field. Whitelists to digits/operators/parentheses/decimal points only before
+   evaluating, so it can never run anything beyond basic arithmetic. Invalid input falls back
+   to 0 rather than silently keeping something that looks like a formula but isn't one. */
+function evalFormula(str){
+  if(str==null) return 0;
+  const expr = String(str).trim();
+  if(expr==='') return 0;
+  if(!/^[0-9+\-*/(). ]+$/.test(expr)) return NaN;
+  try{
+    const val = Function('"use strict"; return (' + expr + ')')();
+    return (typeof val==='number' && isFinite(val)) ? val : NaN;
+  }catch(e){ return NaN; }
+}
+function calcLineAmount(item){
+  const base = (Number(item.qty)||0) * (Number(item.rate)||0);
+  const discPct = Number(item.discountPct)||0;
+  return base * (1 - discPct/100);
+}
 function calcTxnTotals(txn){
+  const rate = Number(txn.exchRate)||1;
   const subtotal = (txn.items||[]).reduce((s,i)=> s+calcLineAmount(i), 0);
   let cgst=0, sgst=0, igst=0;
   (txn.items||[]).forEach(i=>{
@@ -2583,7 +2618,9 @@ function calcTxnTotals(txn){
     else if(txn.gstMode==='Intra'){ cgst += tax/2; sgst += tax/2; }
   });
   const taxAmount = cgst+sgst+igst;
-  return { subtotal, cgst, sgst, igst, taxAmount, grandTotal: subtotal+taxAmount };
+  const grandTotal = subtotal+taxAmount;
+  return { subtotal, cgst, sgst, igst, taxAmount, grandTotal,
+    subtotalINR: subtotal*rate, taxAmountINR: taxAmount*rate, grandTotalINR: grandTotal*rate };
 }
 function txnStatusPill(status){
   const cls = {Draft:'neutral',Sent:'accent',Approved:'good',Completed:'good',Paid:'good',Issued:'accent',Acknowledged:'good',Invoiced:'good'}[status]||'neutral';
@@ -2596,7 +2633,7 @@ function renderTransactions(c, actions){
   actions.querySelector('#consolidatePfiBtn').onclick = ()=> openConsolidateProformaModal();
 
   const outstandingInvoices = TRANSACTIONS.filter(t=>t.txnCategory==='INVOICE' && t.status!=='Paid' && t.status!=='Draft');
-  const outstandingTotal = outstandingInvoices.reduce((s,t)=> s+(calcTxnTotals(t).grandTotal), 0);
+  const outstandingTotal = outstandingInvoices.reduce((s,t)=> s+(calcTxnTotals(t).grandTotalINR), 0);
   const thisMonth = new Date().toISOString().slice(0,7);
   const thisMonthCount = TRANSACTIONS.filter(t=> (t.txnDate||'').slice(0,7)===thisMonth).length;
 
@@ -2638,7 +2675,7 @@ function renderTransactions(c, actions){
         ${list.map(t=>{ const tot = calcTxnTotals(t); return `<tr>
           <td><b>${esc(t.txnNo)}</b>${t.revisionNo?` <span class="pill neutral">Rev-${t.revisionNo}</span>`:''}${t.linkedInvoice?` <span class="pill good" title="Converted to ${esc(t.linkedInvoice)}">→ ${esc(t.linkedInvoice)}</span>`:''}${(t.linkedInvoiceGST||t.linkedInvoiceNonGST)?` <span class="pill good" title="Consolidated: GST ${esc(t.linkedInvoiceGST||'—')}, Non-GST ${esc(t.linkedInvoiceNonGST||'—')}">→ ${esc(t.linkedInvoiceGST||'')} / ${esc(t.linkedInvoiceNonGST||'')}</span>`:''}${t.linkedProforma?` <span class="pill neutral" title="From proforma">from ${esc(t.linkedProforma)}</span>`:''}${(t.linkedProformas&&t.linkedProformas.length)?` <span class="pill neutral" title="Consolidated from ${esc(t.linkedProformas.join(', '))}">from ${t.linkedProformas.length} proforma(s)</span>`:''}</td>
           <td>${esc(t.partyName||'—')}</td><td>${esc(t.txnDate||'—')}</td>
-          <td class="num-cell">${money(tot.grandTotal)}</td><td>${txnStatusPill(t.status)}</td>
+          <td class="num-cell">${t.currency&&t.currency!=='INR'?`${CURRENCY_SYMBOLS[t.currency]||''}${money2(tot.grandTotal)} <span class="pill neutral">${esc(t.currency)}</span><div style="color:var(--muted);font-size:11px;">${money(tot.grandTotalINR)}</div>`:money(tot.grandTotal)}</td><td>${txnStatusPill(t.status)}</td>
           <td class="no-print" style="white-space:nowrap;">
             <button class="btn secondary sm" data-view="${t.id}">View / Print</button>
             <button class="btn secondary sm" data-edit="${t.id}">Edit</button>
@@ -2657,12 +2694,13 @@ function renderTransactions(c, actions){
 }
 
 let txnLineItems = [];
-function blankLineItem(){ return { id: uid(), description:'', hsn:'', qty:1, rate:0, gstPct:18 }; }
+function blankLineItem(){ return { id: uid(), description:'', hsn:'', qty:1, uom:'NOS', rate:0, discountPct:0, gstPct:18 }; }
 function openTxnForm(txnId, prefill){
   const isEdit = !!txnId;
   const blank = {
     txnCategory:'', txnDirection:'Outgoing', partyId:'', txnDate:new Date().toISOString().slice(0,10),
     dueDate:'', referenceType:'', reference:'', subject:'', status:'Draft', gstMode:'Intra',
+    currency:'INR', exchRate:1,
     poNumber:'', poDate:'', poTerms:'', panNumber:'', supplyDateTime:'', placeOfSupply:'', vehicleNo:'',
     dnTransportMode:'Local', dnVehicleNo:'', dnPlaceOfDelivery:'', dnType:'Workshop', dnLinkedInvoice:'', dnSignedStatus:'Pending', dnDeliveryDateTime:'',
     fundReceivedAmount:'', fundReceivedDate:'', fundReceivedVia:'', linkedInvoice:'', linkedProforma:'',
@@ -2676,6 +2714,10 @@ function openTxnForm(txnId, prefill){
 
   openModal(`
     <div class="modal-head"><h3>${isEdit?'Edit':'New'} Transaction</h3><button class="modal-close" id="mClose">✕</button></div>
+    ${isEdit ? `<div class="field" style="background:var(--bg);border:1px solid var(--rule);border-radius:8px;padding:10px 12px;margin-bottom:14px;">
+      <label class="checkline"><input type="checkbox" id="txnMarkRevision"> Save as a new revision ${t.revisionNo?`(currently Rev-${t.revisionNo})`:''}</label>
+      <p class="hint" style="margin:6px 0 0;">Leave unchecked for a plain correction (typo, wrong figure) — it saves in place with no Rev change. Check this only when the document itself has genuinely changed and you need it on the audit trail as a new numbered revision.</p>
+    </div>` : ''}
     <form id="txnForm">
       <div class="grid cols-3">
         <div class="field"><label>Category</label><select name="txnCategory" id="txnCatSel" ${isEdit?'disabled':''}>
@@ -2690,6 +2732,10 @@ function openTxnForm(txnId, prefill){
         <div class="field"><label>Due Date</label><input type="date" name="dueDate" value="${esc(t.dueDate)}"></div>
       </div>
       <div class="grid cols-3">
+        <div class="field"><label>Currency</label><select name="currency" id="txnCurrency">${Object.keys(CURRENCY_SYMBOLS).map(c=>`<option ${t.currency===c?'selected':''}>${c}</option>`).join('')}</select></div>
+        <div class="field"><label>Exchange Rate (→ INR)</label><input type="number" min="0" step="0.0001" name="exchRate" id="txnExchRate" value="${t.exchRate}" ${t.currency==='INR'?'disabled':''}></div>
+      </div>
+      <div class="grid cols-3">
         <div class="field"><label>Reference Type</label><select name="referenceType"><option value="">— None —</option>${TXN_REFERENCE_TYPES.map(r=>`<option ${t.referenceType===r?'selected':''}>${r}</option>`).join('')}</select></div>
         <div class="field"><label>Reference No. / Detail</label><input type="text" name="reference" value="${esc(t.reference)}"></div>
         <div class="field"><label>Subject</label><input type="text" name="subject" value="${esc(t.subject)}"></div>
@@ -2700,7 +2746,7 @@ function openTxnForm(txnId, prefill){
         <div class="field"><label>GST Mode</label><select name="gstMode" id="txnGstMode"><option value="None" ${t.gstMode==='None'?'selected':''}>None</option><option value="Intra" ${t.gstMode==='Intra'?'selected':''}>Intra-state (CGST + SGST)</option><option value="Inter" ${t.gstMode==='Inter'?'selected':''}>Inter-state (IGST)</option></select></div>
       </div>
       <div class="section-label" style="display:flex;align-items:center;justify-content:space-between;">
-        <span>Line Items</span><button type="button" class="btn secondary sm" id="addLineItem">+ Add Line</button>
+        <span>Line Items</span>
       </div>
       <div id="lineItemsWrap"></div>
       <div id="txnTotalsPreview"></div>
@@ -2770,39 +2816,106 @@ function openTxnForm(txnId, prefill){
   }
   if(!isEdit) document.getElementById('txnCatSel').addEventListener('change', applyCategoryRules);
   applyCategoryRules();
+  const txnCurrencySel = document.getElementById('txnCurrency');
+  txnCurrencySel.addEventListener('change', ()=>{
+    const isInr = txnCurrencySel.value==='INR';
+    document.getElementById('txnExchRate').disabled = isInr;
+    if(isInr) document.getElementById('txnExchRate').value = 1;
+    drawLineItems(); drawTotalsPreview();
+  });
 
+  const UOM_OPTIONS = ['NOS','PCS','KG','MTR','LTR','BOX','SET','PKT','HRS','DAY','WKS','MTH','JOB','VESSEL'];
   function drawLineItems(){
-    document.getElementById('lineItemsWrap').innerHTML = txnLineItems.map((li,i)=>`
-      <div class="grid cols-6" style="align-items:end;margin-bottom:6px;" data-line="${i}">
-        <div class="field" style="grid-column:span 2;margin-bottom:0;"><label>Description</label><input type="text" data-li="description" value="${esc(li.description)}"></div>
-        <div class="field" style="margin-bottom:0;"><label>HSN/SAC</label><input type="text" data-li="hsn" value="${esc(li.hsn)}"></div>
-        <div class="field" style="margin-bottom:0;"><label>Qty</label><input type="number" min="0" step="0.01" data-li="qty" value="${li.qty}"></div>
-        <div class="field" style="margin-bottom:0;"><label>Rate</label><input type="number" min="0" step="0.01" data-li="rate" value="${li.rate}"></div>
-        <div class="field" style="margin-bottom:0;display:flex;gap:6px;align-items:end;"><div style="flex:1;"><label>GST %</label><input type="number" min="0" step="0.01" data-li="gstPct" value="${li.gstPct}"></div><button type="button" class="btn danger sm" data-rmline="${i}">✕</button></div>
-      </div>`).join('');
+    const gstMode = document.getElementById('txnGstMode').value;
+    document.getElementById('lineItemsWrap').innerHTML = `
+      <div style="overflow-x:auto;">
+      <table class="lineitem-table"><thead><tr>
+        <th style="width:34px;">#</th><th style="min-width:180px;">Description</th><th style="width:90px;">HSN Code</th>
+        <th style="width:70px;">Qty</th><th style="width:80px;">UOM</th><th style="width:100px;">Cost/Unit</th>
+        <th style="width:80px;">Discount%</th><th style="width:110px;">Taxable Amt</th>
+        <th style="width:70px;">SGST%</th><th style="width:70px;">CGST%</th><th style="width:70px;">IGST%</th>
+        <th style="width:110px;">Total</th><th style="width:34px;"></th>
+      </tr></thead><tbody>
+      ${txnLineItems.map((li,i)=>{
+        const taxable = calcLineAmount(li);
+        const gstPct = Number(li.gstPct)||0;
+        const sgstPct = gstMode==='Intra' ? gstPct/2 : 0;
+        const cgstPct = gstMode==='Intra' ? gstPct/2 : 0;
+        const igstPct = gstMode==='Inter' ? gstPct : 0;
+        const lineTotal = taxable * (1 + (gstMode==='None'?0:gstPct)/100);
+        return `<tr data-line="${i}">
+          <td class="num-cell">${i+1}</td>
+          <td><input type="text" data-li="description" value="${esc(li.description)}" placeholder="Description"></td>
+          <td><input type="text" data-li="hsn" value="${esc(li.hsn)}" placeholder="HSN"></td>
+          <td><input type="number" min="0" step="0.01" data-li="qty" value="${li.qty}"></td>
+          <td><select data-li="uom">${UOM_OPTIONS.map(u=>`<option ${li.uom===u?'selected':''}>${u}</option>`).join('')}</select></td>
+          <td><input type="text" inputmode="decimal" data-li="rate" data-formula="1" value="${li.rate}" placeholder="e.g. 100*5" title="Accepts a formula like 100*5 or (200+50)/2 — evaluates when you leave the field"></td>
+          <td><input type="number" min="0" max="100" step="0.01" data-li="discountPct" value="${li.discountPct||0}"></td>
+          <td class="num-cell">${money2(taxable)}</td>
+          <td><input type="number" min="0" step="0.01" data-li="gstSplitProxy" data-actual="gstPct" value="${sgstPct.toFixed(2)}" ${gstMode!=='Intra'?'disabled':''} title="Editing SGST%/CGST% updates the line's total GST% (they're always equal under Intra-state)"></td>
+          <td><input type="number" min="0" step="0.01" value="${cgstPct.toFixed(2)}" disabled title="Mirrors SGST% under Intra-state"></td>
+          <td><input type="number" min="0" step="0.01" data-li="gstPct" value="${igstPct.toFixed(2)}" ${gstMode!=='Inter'?'disabled':''}></td>
+          <td class="num-cell"><b>${money2(lineTotal)}</b></td>
+          <td><button type="button" class="btn danger sm" data-rmline="${i}" title="Remove line">✕</button></td>
+        </tr>`;
+      }).join('')}
+      </tbody></table>
+      </div>
+      <div class="btn-row" style="margin-top:8px;">
+        <button type="button" class="btn secondary sm" data-addn="1">+ Add 1 Line</button>
+        <button type="button" class="btn secondary sm" data-addn="5">+ Add 5 Lines</button>
+        <button type="button" class="btn secondary sm" data-addn="10">+ Add 10 Lines</button>
+      </div>`;
     document.querySelectorAll('[data-li]').forEach(inp=>{
+      if(inp.dataset.li==='rate'){
+        // Blur, not input — so typing a formula like "100*5" isn't interrupted by a
+        // re-render after every keystroke. Evaluates only once the field is left.
+        inp.addEventListener('blur', ()=>{
+          const idx = Number(inp.closest('[data-line]').dataset.line);
+          const evaluated = evalFormula(inp.value);
+          txnLineItems[idx].rate = isNaN(evaluated) ? 0 : evaluated;
+          drawLineItems(); drawTotalsPreview();
+        });
+        return;
+      }
       inp.addEventListener('input', ()=>{
         const idx = Number(inp.closest('[data-line]').dataset.line);
-        txnLineItems[idx][inp.dataset.li] = inp.dataset.li==='description'||inp.dataset.li==='hsn' ? inp.value : Number(inp.value)||0;
-        drawTotalsPreview();
+        const field = inp.dataset.li;
+        if(field==='gstSplitProxy'){
+          // Editing the SGST% column (Intra-state) sets the line's overall GST% to double it,
+          // since CGST always mirrors SGST and together they make up the full rate.
+          txnLineItems[idx].gstPct = (Number(inp.value)||0)*2;
+        } else if(field==='description' || field==='hsn'){
+          txnLineItems[idx][field] = inp.value;
+        } else if(field==='uom'){
+          txnLineItems[idx].uom = inp.value;
+        } else {
+          txnLineItems[idx][field] = Number(inp.value)||0;
+        }
+        drawLineItems(); drawTotalsPreview();
       });
     });
     document.querySelectorAll('[data-rmline]').forEach(b=> b.onclick=()=>{ txnLineItems.splice(Number(b.dataset.rmline),1); if(!txnLineItems.length) txnLineItems.push(blankLineItem()); drawLineItems(); drawTotalsPreview(); });
+    document.querySelectorAll('[data-addn]').forEach(b=> b.onclick=()=>{ const n=Number(b.dataset.addn); for(let k=0;k<n;k++) txnLineItems.push(blankLineItem()); drawLineItems(); drawTotalsPreview(); });
   }
   function drawTotalsPreview(){
     const gstMode = document.getElementById('txnGstMode').value;
-    const tot = calcTxnTotals({ items:txnLineItems, gstMode });
+    const currency = document.getElementById('txnCurrency').value;
+    const exchRate = Number(document.getElementById('txnExchRate').value)||1;
+    const sym = CURRENCY_SYMBOLS[currency]||'₹';
+    const tot = calcTxnTotals({ items:txnLineItems, gstMode, exchRate });
     document.getElementById('txnTotalsPreview').innerHTML = `
       <div class="divider"></div>
       <div class="grid cols-4">
-        <div><label>Subtotal</label><div><b>${money2(tot.subtotal)}</b></div></div>
-        ${gstMode==='Intra'?`<div><label>CGST</label><div>${money2(tot.cgst)}</div></div><div><label>SGST</label><div>${money2(tot.sgst)}</div></div>`:''}
-        ${gstMode==='Inter'?`<div><label>IGST</label><div>${money2(tot.igst)}</div></div>`:''}
-        <div><label>Grand Total</label><div><b>${money2(tot.grandTotal)}</b></div></div>
-      </div>`;
+        <div><label>Subtotal</label><div><b>${sym}${money2(tot.subtotal)}</b></div></div>
+        ${gstMode==='Intra'?`<div><label>CGST</label><div>${sym}${money2(tot.cgst)}</div></div><div><label>SGST</label><div>${sym}${money2(tot.sgst)}</div></div>`:''}
+        ${gstMode==='Inter'?`<div><label>IGST</label><div>${sym}${money2(tot.igst)}</div></div>`:''}
+        <div><label>Grand Total</label><div><b>${sym}${money2(tot.grandTotal)}</b></div></div>
+      </div>
+      ${currency!=='INR' ? `<div class="hint" style="margin-top:6px;">Grand Total in INR (at ${exchRate}): <b>${money2(tot.grandTotalINR)}</b></div>` : ''}`;
   }
-  document.getElementById('addLineItem').onclick = ()=>{ txnLineItems.push(blankLineItem()); drawLineItems(); drawTotalsPreview(); };
-  document.getElementById('txnGstMode').addEventListener('change', drawTotalsPreview);
+  document.getElementById('txnGstMode').addEventListener('change', ()=>{ drawLineItems(); drawTotalsPreview(); });
+  document.getElementById('txnExchRate').addEventListener('input', drawTotalsPreview);
   drawLineItems(); drawTotalsPreview();
 
   document.getElementById('txnForm').onsubmit = async (ev)=>{
@@ -2830,6 +2943,7 @@ async function submitTxnForm(ev, isEdit, t){
     txnDate: fd.get('txnDate'), dueDate: fd.get('dueDate'),
     referenceType: fd.get('referenceType'), reference: fd.get('reference').trim(), subject: fd.get('subject').trim(),
     status: fd.get('status'), gstMode: fd.get('gstMode'),
+    currency: fd.get('currency')||'INR', exchRate: Number(fd.get('exchRate'))||1,
     poNumber: fd.get('poNumber')||'', poDate: fd.get('poDate')||'', poTerms: fd.get('poTerms')||'',
     panNumber: fd.get('panNumber')||'', supplyDateTime: fd.get('supplyDateTime')||'', placeOfSupply: fd.get('placeOfSupply')||'', vehicleNo: fd.get('vehicleNo')||'',
     dnTransportMode: fd.get('dnTransportMode')||'', dnVehicleNo: fd.get('dnVehicleNo')||'', dnPlaceOfDelivery: fd.get('dnPlaceOfDelivery')||'',
@@ -2843,9 +2957,14 @@ async function submitTxnForm(ev, isEdit, t){
   };
   if(isEdit){
     rec._rev = t._rev; rec.txnNo = t.txnNo;
-    // Keep a lightweight audit trail: snapshot the prior version before applying the new one.
-    rec.revisionHistory = (t.revisionHistory||[]).concat([{ snapshotAt:new Date().toISOString(), by:currentStaffName(), status:t.status, items:t.items, terms:t.terms }]);
-    rec.revisionNo = (t.revisionNo||0)+1;
+    const markRevision = document.getElementById('txnMarkRevision') && document.getElementById('txnMarkRevision').checked;
+    if(markRevision){
+      // Keep a lightweight audit trail: snapshot the prior version before applying the new one.
+      rec.revisionHistory = (t.revisionHistory||[]).concat([{ snapshotAt:new Date().toISOString(), by:currentStaffName(), status:t.status, items:t.items, terms:t.terms }]);
+      rec.revisionNo = (t.revisionNo||0)+1;
+    }
+    // else: plain correction — revisionNo/revisionHistory carry over unchanged (already set
+    // above from t.revisionNo/t.revisionHistory), no new snapshot, no Rev bump.
   } else {
     rec.txnNo = nextTxnNo(rec.txnCategory);
     await saveOrg();
@@ -2860,7 +2979,8 @@ async function submitTxnForm(ev, isEdit, t){
     if(pi){ pi.linkedInvoice = rec.txnNo; pi.status = 'Converted'; tagRecord(pi, false); }
   }
   await saveTransactions();
-  closeModal(); toast(isEdit?'Transaction updated.':`${rec.txnNo} created.`); render();
+  const savedAsRevision = isEdit && rec.revisionNo > (t.revisionNo||0);
+  closeModal(); toast(isEdit ? (savedAsRevision ? `Saved as Rev-${rec.revisionNo}.` : 'Transaction updated.') : `${rec.txnNo} created.`); render();
 }
 /* Starts a new Invoice pre-filled from a Proforma Invoice's party, items, and terms, once
    funds have actually come in. Doesn't try to auto-reconcile the amount if the fund received
@@ -2981,7 +3101,7 @@ function openConsolidateProformaModal(){
   }
   function selectedPiTotal(){
     const ids = Array.from(document.querySelectorAll('.consPiChk:checked')).map(c=>c.value);
-    return TRANSACTIONS.filter(t=> ids.includes(t.id)).reduce((s,t)=> s+calcTxnTotals(t).grandTotal, 0);
+    return TRANSACTIONS.filter(t=> ids.includes(t.id)).reduce((s,t)=> s+calcTxnTotals(t).grandTotalINR, 0);
   }
   function drawVesselRows(){
     document.getElementById('consVesselWrap').innerHTML = `
@@ -3041,7 +3161,7 @@ function openConsolidateProformaModal(){
     if(!selectedIds.length){ toast('Select at least one Proforma Invoice.', true); return; }
     const selectedPIs = TRANSACTIONS.filter(t=> selectedIds.includes(t.id));
     const monthDays = Number(document.getElementById('consMonthDays').value)||31;
-    const piTotal = selectedPIs.reduce((s,t)=> s+calcTxnTotals(t).grandTotal, 0);
+    const piTotal = selectedPIs.reduce((s,t)=> s+calcTxnTotals(t).grandTotalINR, 0);
     const calc = calcConsolidation(monthDays, consolidateVesselRows, piTotal);
     const newVesselNames = consolidateVesselRows.map(v=>v.name.trim()).filter(n=> n && !(ORG.vessels||[]).includes(n));
     if(newVesselNames.length){ ORG.vessels = (ORG.vessels||[]).concat(newVesselNames); await saveOrg(); }
@@ -3065,7 +3185,7 @@ function openConsolidateProformaModal(){
         partyId: selectedPIs[0].partyId, partyName: party?party.partyName:selectedPIs[0].partyName,
         txnDate: new Date().toISOString().slice(0,10), dueDate:'',
         referenceType:'Ref Proforma Invoice No', reference: piNumbers.join(', '), subject: `${label} — ${month}`,
-        status:'Draft', gstMode, items,
+        status:'Draft', gstMode, currency: selectedPIs[0].currency||'INR', exchRate: selectedPIs[0].exchRate||1, items,
         poNumber:'', poDate:'', poTerms:'', panNumber:'', supplyDateTime:'', placeOfSupply:'', vehicleNo:'',
         dnTransportMode:'', dnVehicleNo:'', dnPlaceOfDelivery:'', dnType:'', dnLinkedInvoice:'', dnSignedStatus:'', dnDeliveryDateTime:'',
         fundReceivedAmount:'', fundReceivedDate:'', fundReceivedVia:'', linkedInvoice:'',
@@ -3108,8 +3228,11 @@ function openTxnPrint(id){
   const party = PARTIES.find(p=>p.id===t.partyId);
   const tot = calcTxnTotals(t);
   const meta = TXN_CATEGORIES[t.txnCategory];
+  const sym = CURRENCY_SYMBOLS[t.currency]||'₹';
+  const isForeign = t.currency && t.currency!=='INR';
   const logoHtml = ORG.logo ? `<img src="${ORG.logo}">` : (ORG.companyName||'C').charAt(0).toUpperCase();
   const detailRows = [
+    isForeign && ['CURRENCY', t.currency, 'EXCHANGE RATE (→ INR)', t.exchRate],
     t.poNumber && ['PO NUMBER', t.poNumber, 'PO DATE', t.poDate],
     t.panNumber && ['PAN NUMBER', t.panNumber, 'PLACE OF SUPPLY', t.placeOfSupply],
     t.vehicleNo && ['VEHICLE NO.', t.vehicleNo, 'SUPPLY DATE/TIME', t.supplyDateTime],
@@ -3129,23 +3252,24 @@ function openTxnPrint(id){
           <div style="width:66px;"></div>
         </div>
         <div class="payslip-addr">${esc(ORG.address||'')}${ORG.tel?(' &nbsp;Tel: '+esc(ORG.tel)):''}${ORG.email?(' , Email: '+esc(ORG.email)):''}${ORG.gstin?(' , GSTIN: '+esc(ORG.gstin)):''}</div>
-        <div class="payslip-title">${meta.label.toUpperCase()} — ${esc(t.txnNo)}</div>
+        <div class="payslip-title">${meta.label.toUpperCase()} — ${esc(t.txnNo)}${isForeign?` (${esc(t.currency)})`:''}</div>
         <table class="pstable">
           <tr><td class="lbl">PARTY</td><td class="val">${esc(t.partyName||'—')}</td><td class="lbl">DIRECTION</td><td class="val">${esc(t.txnDirection)}</td></tr>
           <tr><td class="lbl">DATE</td><td class="val">${esc(t.txnDate||'—')}</td><td class="lbl">DUE DATE</td><td class="val">${esc(t.dueDate||'—')}</td></tr>
           <tr><td class="lbl">REFERENCE</td><td class="val">${esc(t.referenceType||'')} ${esc(t.reference||'')}</td><td class="lbl">STATUS</td><td class="val">${esc(t.status)}</td></tr>
           ${t.subject?`<tr><td class="lbl">SUBJECT</td><td class="val" colspan="3">${esc(t.subject)}</td></tr>`:''}
-          ${party?`<tr><td class="lbl">PARTY GST / PAN</td><td class="val">${esc(party.gstNumber||'—')} / ${esc(party.panNumber||'—')}</td><td class="lbl">PARTY ADDRESS</td><td class="val">${esc(party.address||'—')}</td></tr>`:''}
+          ${party?`<tr><td class="lbl">PARTY GST / PAN</td><td class="val">${esc(party.gstNumber||'—')} / ${esc(party.panNumber||'—')}</td><td class="lbl">PARTY ADDRESS</td><td class="val" style="white-space:pre-wrap;">${esc(party.address||'—')}</td></tr>`:''}
           ${detailRows.map(r=>`<tr><td class="lbl">${esc(r[0])}</td><td class="val">${esc(r[1]||'—')}</td><td class="lbl">${esc(r[2])}</td><td class="val">${esc(r[3]||'—')}</td></tr>`).join('')}
         </table>
         <table class="pstable" style="margin-top:-1px;">
-          <tr class="earnhead"><td>DESCRIPTION</td><td>HSN/SAC</td><td>QTY</td><td>RATE</td><td>GST%</td><td class="amtcell">AMOUNT</td></tr>
-          ${(t.items||[]).map(li=>`<tr><td class="val">${esc(li.description)}</td><td class="val">${esc(li.hsn||'—')}</td><td class="val">${li.qty}</td><td class="val amtcell">${money2(li.rate)}</td><td class="val">${li.gstPct}%</td><td class="val amtcell">${money2(calcLineAmount(li))}</td></tr>`).join('')}
-          <tr class="totrow"><td colspan="5">SUBTOTAL</td><td class="amtcell">${money2(tot.subtotal)}</td></tr>
-          ${t.gstMode==='Intra'?`<tr><td colspan="5">CGST</td><td class="amtcell">${money2(tot.cgst)}</td></tr><tr><td colspan="5">SGST</td><td class="amtcell">${money2(tot.sgst)}</td></tr>`:''}
-          ${t.gstMode==='Inter'?`<tr><td colspan="5">IGST</td><td class="amtcell">${money2(tot.igst)}</td></tr>`:''}
-          <tr class="netrow"><td colspan="5">GRAND TOTAL</td><td class="amtcell">${money2(tot.grandTotal)}</td></tr>
-          <tr class="wordsrow"><td colspan="6"><span class="wlabel">Amount in words:</span> ${esc(rupeesInWords(tot.grandTotal))}</td></tr>
+          <tr class="earnhead"><td>DESCRIPTION</td><td>HSN</td><td>QTY</td><td>UOM</td><td>COST/UNIT</td><td>DISC%</td><td>GST%</td><td class="amtcell">TAXABLE AMT</td></tr>
+          ${(t.items||[]).map(li=>`<tr><td class="val">${esc(li.description)}</td><td class="val">${esc(li.hsn||'—')}</td><td class="val">${li.qty}</td><td class="val">${esc(li.uom||'NOS')}</td><td class="val amtcell">${sym}${money2(li.rate)}</td><td class="val">${li.discountPct||0}%</td><td class="val">${li.gstPct}%</td><td class="val amtcell">${sym}${money2(calcLineAmount(li))}</td></tr>`).join('')}
+          <tr class="totrow"><td colspan="7">SUBTOTAL</td><td class="amtcell">${sym}${money2(tot.subtotal)}</td></tr>
+          ${t.gstMode==='Intra'?`<tr><td colspan="7">CGST</td><td class="amtcell">${sym}${money2(tot.cgst)}</td></tr><tr><td colspan="7">SGST</td><td class="amtcell">${sym}${money2(tot.sgst)}</td></tr>`:''}
+          ${t.gstMode==='Inter'?`<tr><td colspan="7">IGST</td><td class="amtcell">${sym}${money2(tot.igst)}</td></tr>`:''}
+          <tr class="netrow"><td colspan="7">GRAND TOTAL</td><td class="amtcell">${sym}${money2(tot.grandTotal)}</td></tr>
+          ${isForeign ? `<tr><td colspan="7">GRAND TOTAL (INR EQUIVALENT @ ${t.exchRate})</td><td class="amtcell">₹${money2(tot.grandTotalINR)}</td></tr>` : ''}
+          <tr class="wordsrow"><td colspan="8"><span class="wlabel">Amount in words${isForeign?' (INR equivalent)':''}:</span> ${esc(rupeesInWords(isForeign?tot.grandTotalINR:tot.grandTotal))}</td></tr>
         </table>
         ${t.terms?`<div class="regime-note"><b>Terms &amp; Conditions:</b> ${esc(t.terms)}</div>`:''}
         ${t.notes?`<div class="regime-note"><b>Notes:</b> ${esc(t.notes)}</div>`:''}
