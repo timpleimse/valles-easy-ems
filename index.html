@@ -1266,6 +1266,7 @@ function annualTaxFor(s, grossAnnual){
    month's gross for Professional Tax slab lookup, since PT is normally assessed on the
    month's total salary paid. Review this treatment against your state's PT rules and your
    company's bonus policy; it's a reasonable default, not a statutory guarantee. */
+function round2(n){ return Math.round((Number(n)||0)*100)/100; }
 function computePayslip(emp, period, bonus){
   bonus = Number(bonus)||0;
   const s = latestSalaryFor(emp, period);
@@ -1274,9 +1275,9 @@ function computePayslip(emp, period, bonus){
   const pfOn = !isContractor || s.contractorPfApplicable;
   const esiOn = !isContractor || s.contractorEsiApplicable;
   const basicForPf = ORG.applyPfCeiling ? Math.min(s.basic, ORG.pfCeiling||15000) : s.basic;
-  const pfEmployee = pfOn ? Math.round(basicForPf*0.12) : 0;
+  const pfEmployee = pfOn ? round2(basicForPf*0.12) : 0;
   const pfEmployer = pfEmployee; // mirrored, standard practice; bonus excluded from PF wages
-  const esi = (esiOn && gross<=21000) ? Math.round(gross*0.0075) : 0; // bonus excluded from ESI wages; threshold always applies regardless of the toggle
+  const esi = (esiOn && gross<=21000) ? round2(gross*0.0075) : 0; // bonus excluded from ESI wages; threshold always applies regardless of the toggle
   const grossWithBonus = gross + bonus;
   const pt = ptFor(grossWithBonus, period);
 
@@ -1285,25 +1286,25 @@ function computePayslip(emp, period, bonus){
     // Section 194C: a flat % of what's actually paid this month — no annualisation, no
     // slabs, no standard deduction/80C/HRA. Bonus (if any) is just added to the same base.
     const rate = (s.contractorTdsRate!=null ? s.contractorTdsRate : 1)/100;
-    tds = Math.round(grossWithBonus*rate);
-    regularTds = Math.round(gross*rate);
-    bonusTaxImpact = tds - regularTds;
+    tds = round2(grossWithBonus*rate);
+    regularTds = round2(gross*rate);
+    bonusTaxImpact = round2(tds - regularTds);
   } else {
     const grossAnnual = gross*12;
     const regularCalc = annualTaxFor(s, grossAnnual);
-    regularTds = Math.round(regularCalc.total/12);
+    regularTds = round2(regularCalc.total/12);
     tds = regularTds; taxableAnnual = regularCalc.taxableAnnual;
     if(bonus > 0){
       const withBonusCalc = annualTaxFor(s, grossAnnual + bonus);
-      bonusTaxImpact = Math.max(0, withBonusCalc.total - regularCalc.total);
-      tds = regularTds + Math.round(bonusTaxImpact);
+      bonusTaxImpact = round2(Math.max(0, withBonusCalc.total - regularCalc.total));
+      tds = round2(regularTds + bonusTaxImpact);
       taxableAnnual = withBonusCalc.taxableAnnual;
     }
   }
 
-  const totalDeductions = pfEmployee+esi+pt+tds;
-  const netPay = gross+bonus-totalDeductions;
-  const ctc = gross+pfEmployer+(s.reimbursement||0);
+  const totalDeductions = round2(pfEmployee+esi+pt+tds);
+  const netPay = round2(gross+bonus-totalDeductions);
+  const ctc = round2(gross+pfEmployer+(s.reimbursement||0));
   return {salarySnapshot:s, gross, bonus, pfEmployee, pfEmployer, esi, pt, tds, regularTds, bonusTaxImpact,
     totalDeductions, netPay, reimbursement:s.reimbursement||0, ctc, taxableAnnual};
 }
