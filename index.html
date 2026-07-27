@@ -4280,6 +4280,12 @@ function renderSettings(c, actions){
     </div>
 
     <div class="card">
+      <h2>Storage Usage</h2>
+      <p style="color:var(--muted);font-size:13px;">Everything below lives in this browser's local storage, which most browsers cap around 5–10MB total. If saves start failing ("browser storage may be full"), this is where to find what to remove — usually large scanned bill/document images.</p>
+      <div id="storageUsageWrap"></div>
+    </div>
+
+    <div class="card">
       <h2>Google Drive Backup &amp; Sync</h2>
       <p style="color:var(--muted);font-size:13px;">Connects this app (hosted on GitHub Pages) to a folder in <b>your own</b> Google Drive. <code>data.json</code> there is kept live — synced a few seconds after any change, and automatically every <b>20 seconds</b> as a backstop, so it stays current across every window/tab you have this app open in. The same sync also keeps a <b>Google Sheet</b> up to date, with one tab each for Employees, Salary History, Payslips and Compliance. "Backup Now" additionally keeps a rolling set of the <b>last 5</b> dated JSON snapshots you can restore from. See README.md for the one-time Google Cloud setup. This app only ever touches files/folders it creates — nothing else in your Drive.</p>
       <div class="field"><label>Google OAuth Client ID</label><input type="text" id="gClientId" placeholder="xxxxxxxxxx.apps.googleusercontent.com" value="${esc(ORG.gdrive.clientId||'')}"></div>
@@ -4327,6 +4333,43 @@ function renderSettings(c, actions){
   };
   const rmLogo = document.getElementById('removeLogo');
   if(rmLogo) rmLogo.onclick = async ()=>{ ORG.logo=''; await saveOrg(); refreshBrand(); renderSettings(c,actions); };
+  (function renderStorageUsage(){
+    const wrap = document.getElementById('storageUsageWrap'); if(!wrap) return;
+    ensureLocal();
+    let raw = ''; try{ raw = localStorage.getItem(LS_KEY) || ''; }catch(e){}
+    const totalBytes = new Blob([raw]).size;
+    const limitBytes = 8*1024*1024; // most browsers cap around 5-10MB; 8MB is a reasonable working estimate
+    const pctUsed = Math.min(100, Math.round(totalBytes/limitBytes*100));
+
+    // Gather every individual attachment across every module, with where it lives, so the
+    // largest ones can be found and removed directly instead of guessing.
+    const items = [];
+    EXPENSES.forEach(e=>{
+      (e.billAttachments||e.attachments||[]).forEach(f=> items.push({label:`Bill: ${e.voucherNo||'(unsaved)'} — ${f.name}`, size:f.size||0, area:'Bills & Expenses'}));
+      (e.receiptAttachments||[]).forEach(f=> items.push({label:`Receipt: ${e.voucherNo||'(unsaved)'} — ${f.name}`, size:f.size||0, area:'Bills & Expenses'}));
+      if(e.tallyAttachment) items.push({label:`Tally voucher: ${e.voucherNo||'(unsaved)'} — ${e.tallyAttachment.name}`, size:e.tallyAttachment.size||0, area:'Bills & Expenses'});
+    });
+    COMPANY_DOCS.forEach(d=> (d.attachments||[]).forEach(f=> items.push({label:`Document: ${d.docName} — ${f.name}`, size:f.size||0, area:'Documents'})));
+    Object.entries(COMPLIANCE).forEach(([empId,recs])=>{
+      const emp = EMPLOYEES.find(x=>x.id===empId);
+      (recs||[]).forEach(r=> (r.files||[]).forEach(f=> items.push({label:`Compliance (${emp?emp.name:empId}): ${f.name}`, size:f.size||0, area:'Compliance'})));
+    });
+    const byArea = {};
+    items.forEach(i=>{ byArea[i.area] = (byArea[i.area]||0) + i.size; });
+    const top10 = items.slice().sort((a,b)=> b.size-a.size).slice(0,10);
+
+    wrap.innerHTML = `
+      <div class="grid cols-2">
+        <div><label>Total Local Storage Used</label><div><b style="${pctUsed>80?'color:var(--bad);':''}">${(totalBytes/1024/1024).toFixed(2)} MB (~${pctUsed}% of typical browser limit)</b></div></div>
+        <div><label>Total Attachments</label><div><b>${items.length}</b> across ${Object.keys(byArea).length} area(s)</div></div>
+      </div>
+      ${Object.keys(byArea).length ? `<div class="section-label" style="margin-top:10px;">By Area</div><div class="grid cols-3">${Object.entries(byArea).map(([area,sz])=>`<div><label>${esc(area)}</label><div>${(sz/1024/1024).toFixed(2)} MB</div></div>`).join('')}</div>` : ''}
+      ${top10.length ? `<div class="section-label" style="margin-top:10px;">Largest Individual Attachments</div>
+      <table><thead><tr><th>File</th><th>Area</th><th class="num-cell">Size</th></tr></thead><tbody>
+        ${top10.map(i=>`<tr><td>${esc(i.label)}</td><td>${esc(i.area)}</td><td class="num-cell">${(i.size/1024).toFixed(0)} KB</td></tr>`).join('')}
+      </tbody></table>` : '<div class="hint" style="margin-top:8px;">No attachments recorded yet.</div>'}
+    `;
+  })();
   const saveTxnBtn = document.getElementById('saveTxnSettings');
   if(saveTxnBtn) saveTxnBtn.onclick = async ()=>{
     ORG.allowFinalisedTxnEdit = document.getElementById('allowTxnEditChk').checked;
