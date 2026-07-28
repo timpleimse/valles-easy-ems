@@ -4432,13 +4432,13 @@ function renderSettings(c, actions){
     // across every module, so it can be uploaded and replaced with a lightweight reference.
     const jobs = [];
     EXPENSES.forEach(e=>{
-      (e.billAttachments||e.attachments||[]).forEach((f,i)=>{ if(f.data && !f.driveFileId) jobs.push({f, apply:(uploaded)=>{ const arr=(e.billAttachments||e.attachments); arr[i]=uploaded; }}); });
-      (e.receiptAttachments||[]).forEach((f,i)=>{ if(f.data && !f.driveFileId) jobs.push({f, apply:(uploaded)=>{ e.receiptAttachments[i]=uploaded; }}); });
-      if(e.tallyAttachment && e.tallyAttachment.data && !e.tallyAttachment.driveFileId) jobs.push({f:e.tallyAttachment, apply:(uploaded)=>{ e.tallyAttachment=uploaded; }});
+      (e.billAttachments||e.attachments||[]).forEach((f,i)=>{ if(f.data && !f.driveFileId) jobs.push({f, kind:'expense', record:e, apply:(uploaded)=>{ const arr=(e.billAttachments||e.attachments); arr[i]=uploaded; }}); });
+      (e.receiptAttachments||[]).forEach((f,i)=>{ if(f.data && !f.driveFileId) jobs.push({f, kind:'expense', record:e, apply:(uploaded)=>{ e.receiptAttachments[i]=uploaded; }}); });
+      if(e.tallyAttachment && e.tallyAttachment.data && !e.tallyAttachment.driveFileId) jobs.push({f:e.tallyAttachment, kind:'expense', record:e, apply:(uploaded)=>{ e.tallyAttachment=uploaded; }});
     });
-    COMPANY_DOCS.forEach(d=> (d.attachments||[]).forEach((f,i)=>{ if(f.data && !f.driveFileId) jobs.push({f, apply:(uploaded)=>{ d.attachments[i]=uploaded; }}); }));
+    COMPANY_DOCS.forEach(d=> (d.attachments||[]).forEach((f,i)=>{ if(f.data && !f.driveFileId) jobs.push({f, kind:'doc', record:d, apply:(uploaded)=>{ d.attachments[i]=uploaded; }}); }));
     const complianceTouched = new Set();
-    Object.entries(COMPLIANCE).forEach(([empId,recs])=> (recs||[]).forEach(r=> (r.files||[]).forEach((f,i)=>{ if(f.data && !f.driveFileId) jobs.push({f, apply:(uploaded)=>{ r.files[i]=uploaded; complianceTouched.add(empId); }}); })));
+    Object.entries(COMPLIANCE).forEach(([empId,recs])=> (recs||[]).forEach(r=> (r.files||[]).forEach((f,i)=>{ if(f.data && !f.driveFileId) jobs.push({f, kind:'compliance', record:r, empId, apply:(uploaded)=>{ r.files[i]=uploaded; complianceTouched.add(empId); }}); })));
 
     if(!jobs.length){ toast('Nothing to migrate — no inline attachments found.'); migrateBtn.disabled=false; return; }
     let done = 0, failed = 0;
@@ -4447,6 +4447,15 @@ function renderSettings(c, actions){
       try{ const uploaded = await driveUploadAttachmentFile(job.f); job.apply(uploaded); done++; }
       catch(e){ failed++; }
     }
+    // Bump _rev on every touched record so the merge system recognizes this as a genuine
+    // change — without this, a concurrent sync from another device could silently overwrite
+    // the migrated (smaller) record with an older, un-migrated one still holding inline data.
+    // Using the direct record reference captured when each job was created, not array
+    // membership — the original attachment object no longer exists in its array by this
+    // point, since apply() already replaced it with the lightweight reference.
+    new Set(jobs.filter(j=>j.kind==='expense').map(j=>j.record)).forEach(e=> tagRecord(e, false));
+    new Set(jobs.filter(j=>j.kind==='doc').map(j=>j.record)).forEach(d=> tagRecord(d, false));
+    new Set(jobs.filter(j=>j.kind==='compliance').map(j=>j.record)).forEach(r=> tagRecord(r, false));
     await saveExpenses(); await saveCompanyDocs();
     for(const empId of complianceTouched){ await saveCompliance(empId); }
     migrateBtn.disabled = false; migrateBtn.textContent = '☁ Migrate Attachments to Google Drive';
