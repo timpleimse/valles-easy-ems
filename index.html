@@ -4374,6 +4374,15 @@ function renderSettings(c, actions){
       ` : `<div style="font-size:13px;color:var(--muted);">Not connected. Paste a Client ID and click Connect to begin.</div>`}
     </div>
 
+    ${(ORG.gdrive && ORG.gdrive.connected) ? `
+    <div class="card">
+      <h2>Data Recovery — Version History</h2>
+      <div style="background:#FFFBEB;border:1px solid #FDE68A;border-radius:8px;padding:10px 12px;font-size:13px;color:var(--ink-soft);margin-bottom:12px;">
+        ⚠ Restoring a slot overwrites <b>only that data file's</b> current content with the chosen backup — everything else stays as it is. Your current data for that file is backed up first, so a restore can itself be undone. Backups are the same rolling 5 shown above — Slot 1 is the most recent, Slot 5 the oldest.
+      </div>
+      <div id="recoveryGridWrap"><div class="empty" style="padding:12px;">Loading…</div></div>
+    </div>` : ''}
+
     <div class="card">
       <h2>Pin Drive Folder &amp; Sheet <span class="tag">recommended for multiple staff</span></h2>
       <p style="color:var(--muted);font-size:13px;">Without this, a brand-new device figures out which folder/sheet to use by searching Drive for them by name — reliable, but not bulletproof (e.g. it breaks if the company name is ever changed, since the sheet's name would no longer match). <b>Pinning removes the guesswork entirely</b>: paste the exact IDs once here, and every device that has this Client ID configured uses those exact resources from the start, with zero risk of ever creating a duplicate. If this device is already connected and syncing correctly, just click "Use This Device's Current IDs" below, then copy the two values shown to every other device's Settings.</p>
@@ -4673,12 +4682,113 @@ function renderSettings(c, actions){
       backupListEl.querySelectorAll('[data-viewbackup]').forEach(b=>{
         b.onclick = ()=> viewDriveBackupDetail(b.dataset.viewbackup, b.dataset.label);
       });
+      renderRecoveryGrid(files);
     }).catch(()=>{ if(document.getElementById('driveBackupList')) backupListEl.innerHTML = '<div class="empty" style="padding:12px;">Could not load backups.</div>'; });
   }
 }
 /* Shows what's actually inside a Drive backup — a breakdown per module — before deciding
    whether to restore it. Fetches the file on demand rather than keeping all 5 backups'
    content loaded at once. */
+/* Per-module version history — same 5 rolling Drive backups already shown above, but lets
+   you restore just ONE data file (e.g. only Payslips) from a specific slot, leaving
+   everything else untouched, instead of an all-or-nothing whole-app restore. */
+const RECOVERY_MODULES = [
+  { key:'employees', label:'Staff', category:'People' },
+  { key:'payslips', label:'Payslips', category:'People' },
+  { key:'compliance', label:'Compliance', category:'People' },
+  { key:'transactions', label:'Transactions', category:'Transactions & Bills' },
+  { key:'expenses', label:'Bills & Expenses', category:'Transactions & Bills' },
+  { key:'parties', label:'Parties', category:'Company' },
+  { key:'documents', label:'Documents', category:'Company' },
+  { key:'org', label:'Company Settings', category:'Company' },
+];
+let _backupContentCache = {};
+async function fetchBackupCached(fileId){
+  if(_backupContentCache[fileId]) return _backupContentCache[fileId];
+  const res = await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
+  const data = await res.json();
+  _backupContentCache[fileId] = data;
+  return data;
+}
+function extractModuleData(payload, key){ return payload ? payload[key] : undefined; }
+function moduleRecordCount(key, data){
+  if(data==null) return 0;
+  if(key==='compliance') return Object.values(data).reduce((s,arr)=> s+(arr||[]).length, 0);
+  if(key==='org') return data.companyName ? 1 : 0;
+  return Array.isArray(data) ? data.length : 0;
+}
+async function applyModuleRestore(key, data){
+  if(key==='employees'){ EMPLOYEES = data||[]; await saveEmployees(); }
+  else if(key==='payslips'){ PAYSLIPS = data||[]; await savePayslips(); }
+  else if(key==='compliance'){ COMPLIANCE = data||{}; for(const empId of Object.keys(COMPLIANCE)) await saveCompliance(empId); }
+  else if(key==='transactions'){ TRANSACTIONS = data||[]; await saveTransactions(); }
+  else if(key==='expenses'){ EXPENSES = data||[]; await saveExpenses(); }
+  else if(key==='parties'){ PARTIES = data||[]; await saveParties(); }
+  else if(key==='documents'){ COMPANY_DOCS = data||[]; await saveCompanyDocs(); }
+  else if(key==='org'){ const gdriveKeep = ORG.gdrive; ORG = data||ORG; ORG.gdrive = gdriveKeep; backfillOrgDefaults(); await saveOrg(); }
+}
+async function viewModuleSlot(fileId, moduleKey, label, slotLabel){
+  const mod = RECOVERY_MODULES.find(m=>m.key===moduleKey);
+  openModal(`<div class="modal-head"><h3>${esc(mod.label)} — ${esc(slotLabel)}</h3><button class="modal-close" id="mClose">✕</button></div><div class="empty" style="padding:20px;">Loading…</div>`);
+  document.getElementById('mClose').onclick = closeModal;
+  try{
+    const payload = await fetchBackupCached(fileId);
+    const data = extractModuleData(payload, moduleKey);
+    const count = moduleRecordCount(moduleKey, data);
+    openModal(`
+      <div class="modal-head"><h3>${esc(mod.label)} — ${esc(slotLabel)}</h3><button class="modal-close" id="mClose">✕</button></div>
+      <p>${esc(label)}</p>
+      <div class="grid cols-2"><div><label>Records in this slot</label><div><b>${count}</b></div></div></div>
+      <div class="btn-row" style="margin-top:14px;"><button class="btn danger" id="viewToRestoreModule">Restore Just ${esc(mod.label)} From This Slot</button><button class="btn secondary" id="mCancel">Close</button></div>
+    `, true);
+    document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+    document.getElementById('viewToRestoreModule').onclick = ()=>{ closeModal(); restoreModuleSlot(fileId, moduleKey, label); };
+  }catch(e){
+    openModal(`<div class="modal-head"><h3>${esc(mod.label)}</h3><button class="modal-close" id="mClose">✕</button></div><div class="empty" style="padding:20px;color:var(--bad);">Could not load: ${esc(e.message)}</div>`);
+    document.getElementById('mClose').onclick = closeModal;
+  }
+}
+async function restoreModuleSlot(fileId, moduleKey, label){
+  const mod = RECOVERY_MODULES.find(m=>m.key===moduleKey);
+  openModal(`
+    <div class="modal-head"><h3>Restore ${esc(mod.label)}</h3><button class="modal-close" id="mClose">✕</button></div>
+    <p>This replaces the current <b>${esc(mod.label)}</b> data with the version from <b>${esc(label)}</b>. Nothing else in the app is touched. Your current ${esc(mod.label)} data is backed up first, so this can itself be undone.</p>
+    <div class="btn-row"><button class="btn danger" id="confirmModuleRestore">Restore ${esc(mod.label)}</button><button class="btn secondary" id="mCancel">Cancel</button></div>
+  `);
+  document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+  document.getElementById('confirmModuleRestore').onclick = async ()=>{
+    const btn = document.getElementById('confirmModuleRestore'); btn.disabled = true; btn.textContent = 'Backing up current data…';
+    try{
+      await driveBackupNow(); // safety net — current state becomes a fresh Slot 1 before we overwrite anything
+      btn.textContent = 'Restoring…';
+      const payload = await fetchBackupCached(fileId);
+      const data = extractModuleData(payload, moduleKey);
+      await applyModuleRestore(moduleKey, data);
+      closeModal(); toast(`${mod.label} restored from ${label}.`); render();
+    }catch(e){ toast('Restore failed: '+e.message, true); btn.disabled=false; btn.textContent='Restore '+mod.label; }
+  };
+}
+function renderRecoveryGrid(files){
+  const wrap = document.getElementById('recoveryGridWrap'); if(!wrap) return;
+  if(!files.length){ wrap.innerHTML = '<div class="empty" style="padding:12px;">No backups yet — click "Backup Now to Drive" above first.</div>'; return; }
+  const categories = [...new Set(RECOVERY_MODULES.map(m=>m.category))];
+  wrap.innerHTML = categories.map(cat=>`
+    <div class="section-label" style="margin-top:14px;">${esc(cat)}</div>
+    <div style="overflow-x:auto;">
+    <table><thead><tr><th>Data File</th>${files.map((f,i)=>`<th>Slot ${i+1}${i===0?' (newest)':''}${i===files.length-1&&files.length===5?' (oldest)':''}</th>`).join('')}</tr></thead><tbody>
+      ${RECOVERY_MODULES.filter(m=>m.category===cat).map(m=>`
+        <tr><td><b>${esc(m.label)}</b></td>
+        ${files.map(f=>{
+          const label = `${f.name} — ${new Date(f.createdTime).toLocaleString('en-IN')}`;
+          return `<td style="white-space:nowrap;"><button type="button" class="btn secondary sm" data-viewslot="${f.id}" data-mod="${m.key}" data-label="${esc(label)}" title="View">👁</button> <button type="button" class="btn secondary sm" data-restoreslot="${f.id}" data-mod="${m.key}" data-label="${esc(label)}" title="Restore">↺</button></td>`;
+        }).join('')}
+        </tr>`).join('')}
+    </tbody></table>
+    </div>
+  `).join('');
+  wrap.querySelectorAll('[data-viewslot]').forEach(b=> b.onclick = ()=> viewModuleSlot(b.dataset.viewslot, b.dataset.mod, b.dataset.label, b.dataset.label));
+  wrap.querySelectorAll('[data-restoreslot]').forEach(b=> b.onclick = ()=> restoreModuleSlot(b.dataset.restoreslot, b.dataset.mod, b.dataset.label));
+}
 async function viewDriveBackupDetail(fileId, label){
   openModal(`<div class="modal-head"><h3>${esc(label)}</h3><button class="modal-close" id="mClose">✕</button></div><div class="empty" style="padding:20px;">Loading…</div>`);
   document.getElementById('mClose').onclick = closeModal;
