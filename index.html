@@ -3505,7 +3505,7 @@ function calcExpenseTotals(e){
   }
   if(billType==='STATUTORY'){
     const amt = Number(e.statutoryAmount)||0;
-    const balance = Math.max(0, amt-(Number(e.paidAmount)||0));
+    const balance = amt-(Number(e.paidAmount)||0); // negative = overpaid, kept visible rather than clamped to 0
     return { amt, amtINR:amt, cgst:0, sgst:0, igst:0, gstTotal:0, tdsAmount:0, deductionsTotal:0,
       grossTotal:amt, netPayable:amt, balance, payStatus:payStatusFor(amt, Number(e.paidAmount)||0) };
   }
@@ -3514,7 +3514,7 @@ function calcExpenseTotals(e){
     const tdsAmount = e.tdsApplicable ? amt*(Number(e.tdsRate)||0)/100 : 0;
     const deductionsTotal = e.deductionsApplicable ? (Number(e.pfAmt)||0)+(Number(e.ptAmt)||0)+(Number(e.esicAmt)||0)+(Number(e.otherDeduction)||0) : 0;
     const netPayable = amt - tdsAmount - deductionsTotal;
-    const balance = Math.max(0, netPayable-(Number(e.paidAmount)||0));
+    const balance = netPayable-(Number(e.paidAmount)||0); // negative = overpaid, kept visible rather than clamped to 0
     return { amt, amtINR:amt, cgst:0, sgst:0, igst:0, gstTotal:0, tdsAmount, deductionsTotal,
       grossTotal:amt, netPayable, balance, payStatus:payStatusFor(netPayable, Number(e.paidAmount)||0) };
   }
@@ -3537,7 +3537,7 @@ function calcExpenseTotals(e){
   const deductionsTotal = e.deductionsApplicable ? (Number(e.pfAmt)||0)+(Number(e.ptAmt)||0)+(Number(e.esicAmt)||0)+(Number(e.otherDeduction)||0) : 0;
   const grossTotal = e.rcmApplicable ? amtINR : (amtINR + gstTotal);
   const netPayable = grossTotal - tdsAmount - deductionsTotal;
-  const balance = Math.max(0, netPayable - (Number(e.paidAmount)||0));
+  const balance = netPayable - (Number(e.paidAmount)||0); // negative = overpaid, kept visible rather than clamped to 0
   return { amt, amtINR, cgst, sgst, igst, gstTotal, tdsAmount, deductionsTotal,
     grossTotal, netPayable, balance, payStatus:payStatusFor(netPayable, Number(e.paidAmount)||0) };
 }
@@ -3605,7 +3605,7 @@ function renderExpenses(c, actions){
         <td><b>${esc(e.voucherNo)}</b>${e.billNo?`<div style="color:var(--muted);font-size:11.5px;">${esc(e.billNo)}</div>`:''}${e.currency&&e.currency!=='INR'?` <span class="pill neutral">${esc(e.currency)}</span>`:''}${e.rcmApplicable?' <span class="pill warn">RCM</span>':''}</td>
         <td><span class="pill neutral">${esc(BILL_TYPE_LABELS[e.billType]||'Supplier')}</span></td>
         <td>${esc(expPartyLabel(e))}</td><td>${esc(e.billDate||'—')}</td><td>${esc(e.category||'—')}</td>
-        <td class="num-cell">${money(tot.netPayable)}</td><td class="num-cell">${money(tot.balance)}</td>
+        <td class="num-cell">${money(tot.netPayable)}</td><td class="num-cell">${tot.balance<0?`<span style="color:var(--good);">Overpaid ${money(Math.abs(tot.balance))}</span>`:money(tot.balance)}</td>
         <td>${e.tdsApplicable?`<span class="pill accent">${esc((TDS_SECTION_BY_ID[e.tdsSectionId]||{}).oldCode||'')} ${e.tdsRate}%</span>`:'—'}</td>
         <td>
           <span class="pill ${hasBill?'good':'bad'}" title="Bill copy — click to view" data-viewbill="${e.id}" style="cursor:pointer;">📄 ${hasBill?'✓':'✕'}</span>
@@ -3917,7 +3917,7 @@ function openExpenseForm(expId){
         ${bt==='SUPPLIER' ? `<div><label>GST Amount${document.getElementById('expRcmChk').checked?' (self-assessed, not paid to vendor)':''}</label><div><b>${money2(tot.gstTotal)}</b></div></div>` : ''}
         ${(bt==='SUPPLIER'||bt==='SALARY') ? `<div><label>TDS Deducted</label><div><b>${money2(tot.tdsAmount)}</b></div></div><div><label>Deductions (PF/PT/ESIC)</label><div><b>${money2(tot.deductionsTotal)}</b></div></div>` : ''}
         <div><label>${payLabel}</label><div><b>${money2(tot.netPayable)}</b></div></div>
-        <div><label>Balance Due</label><div><b style="${tot.balance>0?'color:var(--bad);':''}">${money2(tot.balance)}</b></div></div>
+        <div><label>${tot.balance<0?'Overpaid':'Balance Due'}</label><div><b style="${tot.balance>0?'color:var(--bad);':(tot.balance<0?'color:var(--good);':'')}">${tot.balance<0?'Overpaid by '+money2(Math.abs(tot.balance)):money2(tot.balance)}</b></div></div>
       </div>`;
   }
   document.getElementById('expTdsChk').addEventListener('change', (ev)=>{
