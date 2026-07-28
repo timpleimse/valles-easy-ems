@@ -1623,18 +1623,15 @@ function readFileAsDataURL(file){
   return new Promise((res,rej)=>{ const r = new FileReader(); r.onload = ()=>res({name:file.name, type:file.type, size:file.size, data:r.result}); r.onerror = rej; r.readAsDataURL(file); });
 }
 /* Used by every attachment upload flow (bills, receipts, Tally vouchers, documents,
-   compliance files). When Drive is connected, uploads the file there right away and returns
-   just a lightweight reference, so the local record — and therefore localStorage — never
-   holds the actual file bytes. Falls back to the old inline-embed behavior when Drive isn't
-   connected, so attachments still work offline; that fallback does cost local storage space
-   until Drive is connected and the file gets migrated (see Settings → Storage Usage). */
+   compliance files). Attachments only ever go to Drive now — no local-embed fallback — so a
+   file added while Drive isn't connected is refused outright with a clear message, rather
+   than silently landing back in localStorage the way the old fallback did. */
 async function processAttachmentUpload(file){
-  const localFile = await readFileAsDataURL(file);
-  if(driveConnected() && ORG.gdrive && ORG.gdrive.connected){
-    try{ return await driveUploadAttachmentFile(localFile); }
-    catch(e){ toast('Could not upload "'+file.name+'" to Drive — saved locally instead. ('+e.message+')', true); return localFile; }
+  if(!driveConnected() || !ORG.gdrive || !ORG.gdrive.connected){
+    throw new Error('Connect Google Drive (Settings) before adding attachments — they no longer save to this browser.');
   }
-  return localFile;
+  const localFile = await readFileAsDataURL(file);
+  return await driveUploadAttachmentFile(localFile);
 }
 /* Chrome blocks top-frame navigation straight to a data: URL (the "Not allowed to navigate
    top frame to data URL" console error) — a security measure against disguised-download
@@ -1722,7 +1719,7 @@ function openComplianceForm(){
   dropZone.ondrop = async (e)=>{ e.preventDefault(); await handleFiles(e.dataTransfer.files); };
   fileInput.onchange = async ()=> handleFiles(fileInput.files);
   async function handleFiles(fileList){
-    for(const f of fileList){ try{ pendingFiles.push(await processAttachmentUpload(f)); }catch(err){ toast('Could not read file: '+f.name, true); } }
+    for(const f of fileList){ try{ pendingFiles.push(await processAttachmentUpload(f)); }catch(err){ toast(err.message||('Could not add file: '+f.name), true); } }
     drawChips();
   }
   function drawChips(){
@@ -2611,7 +2608,7 @@ function openDocForm(docId){
   dropZone.ondrop = async (e)=>{ e.preventDefault(); await handleDocFiles(e.dataTransfer.files); };
   fileInput.onchange = async ()=> handleDocFiles(fileInput.files);
   async function handleDocFiles(fileList){
-    for(const f of fileList){ try{ pendingDocFiles.push(await processAttachmentUpload(f)); }catch(err){ toast('Could not read file: '+f.name, true); } }
+    for(const f of fileList){ try{ pendingDocFiles.push(await processAttachmentUpload(f)); }catch(err){ toast(err.message||('Could not add file: '+f.name), true); } }
     drawDocChips();
   }
   function drawDocChips(){
@@ -3976,7 +3973,7 @@ function openExpenseForm(expId){
   tallyFileInput.onchange = async ()=> handleTallyFile(tallyFileInput.files[0]);
   async function handleTallyFile(f){
     if(!f) return;
-    try{ pendingTallyFile = await processAttachmentUpload(f); drawTallyChip(); }catch(err){ toast('Could not read file: '+f.name, true); }
+    try{ pendingTallyFile = await processAttachmentUpload(f); drawTallyChip(); }catch(err){ toast(err.message||('Could not add file: '+f.name), true); }
   }
   function drawTallyChip(){
     document.getElementById('tallyFileChip').innerHTML = pendingTallyFile ? `<div class="file-chip"><span class="fname">${esc(pendingTallyFile.name)} (${Math.round(pendingTallyFile.size/1024)} KB)</span><button type="button" class="btn secondary sm" id="tallyViewBtn">View</button><button type="button" id="rmTallyFile">✕</button></div>` : '';
@@ -3993,7 +3990,7 @@ function openExpenseForm(expId){
   billDropZone.ondrop = async (ev)=>{ ev.preventDefault(); await handleBillFiles(ev.dataTransfer.files); };
   billFileInput.onchange = async ()=> handleBillFiles(billFileInput.files);
   async function handleBillFiles(fileList){
-    for(const f of fileList){ try{ pendingBillFiles.push(await processAttachmentUpload(f)); }catch(err){ toast('Could not read file: '+f.name, true); } }
+    for(const f of fileList){ try{ pendingBillFiles.push(await processAttachmentUpload(f)); }catch(err){ toast(err.message||('Could not add file: '+f.name), true); } }
     drawBillChips();
   }
   function drawBillChips(){
@@ -4009,7 +4006,7 @@ function openExpenseForm(expId){
   receiptDropZone.ondrop = async (ev)=>{ ev.preventDefault(); await handleReceiptFiles(ev.dataTransfer.files); };
   receiptFileInput.onchange = async ()=> handleReceiptFiles(receiptFileInput.files);
   async function handleReceiptFiles(fileList){
-    for(const f of fileList){ try{ pendingReceiptFiles.push(await processAttachmentUpload(f)); }catch(err){ toast('Could not read file: '+f.name, true); } }
+    for(const f of fileList){ try{ pendingReceiptFiles.push(await processAttachmentUpload(f)); }catch(err){ toast(err.message||('Could not add file: '+f.name), true); } }
     drawReceiptChips();
   }
   function drawReceiptChips(){
@@ -4458,8 +4455,14 @@ function renderSettings(c, actions){
     new Set(jobs.filter(j=>j.kind==='compliance').map(j=>j.record)).forEach(r=> tagRecord(r, false));
     await saveExpenses(); await saveCompanyDocs();
     for(const empId of complianceTouched){ await saveCompliance(empId); }
+    // Push to Drive right now rather than waiting for the normal debounced sync — otherwise
+    // a hard refresh shortly after migrating could catch the smaller local state before it's
+    // actually reached Drive, and pull the old, larger version straight back in on reconnect.
+    migrateBtn.textContent = 'Syncing to Drive…';
+    driveDirty = true;
+    try{ await driveSyncNow(); }catch(e){}
     migrateBtn.disabled = false; migrateBtn.textContent = '☁ Migrate Attachments to Google Drive';
-    toast(`Migrated ${done} attachment(s) to Drive${failed?`, ${failed} failed`:''}.`, failed>0);
+    toast(`Migrated ${done} attachment(s) to Drive${failed?`, ${failed} failed — retry to pick up the rest`:''}.`, failed>0);
     renderSettings(c, actions);
   };
   const saveTxnBtn = document.getElementById('saveTxnSettings');
