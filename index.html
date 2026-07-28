@@ -1622,6 +1622,20 @@ let pendingFiles = [];
 function readFileAsDataURL(file){
   return new Promise((res,rej)=>{ const r = new FileReader(); r.onload = ()=>res({name:file.name, type:file.type, size:file.size, data:r.result}); r.onerror = rej; r.readAsDataURL(file); });
 }
+/* Used by every attachment upload flow (bills, receipts, Tally vouchers, documents,
+   compliance files). When Drive is connected, uploads the file there right away and returns
+   just a lightweight reference, so the local record — and therefore localStorage — never
+   holds the actual file bytes. Falls back to the old inline-embed behavior when Drive isn't
+   connected, so attachments still work offline; that fallback does cost local storage space
+   until Drive is connected and the file gets migrated (see Settings → Storage Usage). */
+async function processAttachmentUpload(file){
+  const localFile = await readFileAsDataURL(file);
+  if(driveConnected() && ORG.gdrive && ORG.gdrive.connected){
+    try{ return await driveUploadAttachmentFile(localFile); }
+    catch(e){ toast('Could not upload "'+file.name+'" to Drive — saved locally instead. ('+e.message+')', true); return localFile; }
+  }
+  return localFile;
+}
 /* Chrome blocks top-frame navigation straight to a data: URL (the "Not allowed to navigate
    top frame to data URL" console error) — a security measure against disguised-download
    phishing. blob: URLs aren't subject to that restriction, so every attachment view/download
@@ -1644,21 +1658,28 @@ function dataURLtoBlob(dataURL){
   for(let i=0;i<binary.length;i++) bytes[i] = binary.charCodeAt(i);
   return new Blob([bytes], {type: mime});
 }
-function openAttachmentBlob(f){
+async function getAttachmentBlob(f){
+  if(f.driveFileId) return await driveFetchAttachmentFile(f.driveFileId);
+  if(f.data) return dataURLtoBlob(f.data);
+  throw new Error('No file data available');
+}
+async function openAttachmentBlob(f){
   try{
-    const url = URL.createObjectURL(dataURLtoBlob(f.data));
+    const blob = await getAttachmentBlob(f);
+    const url = URL.createObjectURL(blob);
     window.open(url, '_blank');
     setTimeout(()=> URL.revokeObjectURL(url), 60000);
-  }catch(e){ toast('Could not open "'+f.name+'" — try Download instead.', true); }
+  }catch(e){ toast('Could not open "'+f.name+'": '+e.message, true); }
 }
-function downloadAttachmentBlob(f){
+async function downloadAttachmentBlob(f){
   try{
-    const url = URL.createObjectURL(dataURLtoBlob(f.data));
+    const blob = await getAttachmentBlob(f);
+    const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = f.name;
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     setTimeout(()=> URL.revokeObjectURL(url), 5000);
-  }catch(e){ toast('Could not download "'+f.name+'".', true); }
+  }catch(e){ toast('Could not download "'+f.name+'": '+e.message, true); }
 }
 function openRegisteredAttachment(id){ const f = _attachmentRegistry[id]; if(f) openAttachmentBlob(f); }
 function downloadRegisteredAttachment(id){ const f = _attachmentRegistry[id]; if(f) downloadAttachmentBlob(f); }
@@ -1701,7 +1722,7 @@ function openComplianceForm(){
   dropZone.ondrop = async (e)=>{ e.preventDefault(); await handleFiles(e.dataTransfer.files); };
   fileInput.onchange = async ()=> handleFiles(fileInput.files);
   async function handleFiles(fileList){
-    for(const f of fileList){ try{ pendingFiles.push(await readFileAsDataURL(f)); }catch(err){ toast('Could not read file: '+f.name, true); } }
+    for(const f of fileList){ try{ pendingFiles.push(await processAttachmentUpload(f)); }catch(err){ toast('Could not read file: '+f.name, true); } }
     drawChips();
   }
   function drawChips(){
@@ -1843,6 +1864,37 @@ async function driveSetup(){
   await saveOrgSilent();
 }
 async function saveOrgSilent(){ ensureLocal(); LOCAL.org = ORG; try{ localStorage.setItem(LS_KEY, JSON.stringify(LOCAL)); }catch(e){} }
+/* Attachments live as individual files in Drive (an "Attachments" subfolder), not embedded
+   as base64 inside the main synced JSON — that's what was filling up localStorage, since
+   every attachment was being duplicated into the one blob that lives in the browser. Local
+   records now hold just a lightweight reference {driveFileId, name, type, size}; the actual
+   bytes are fetched from Drive on demand when viewing/downloading. */
+async function driveEnsureAttachmentsFolder(){
+  if(ORG.gdrive.attachmentsFolderId) return ORG.gdrive.attachmentsFolderId;
+  if(!ORG.gdrive.folderId) await driveSetup();
+  ORG.gdrive.attachmentsFolderId = await driveFindOrCreateFolder('Attachments', ORG.gdrive.folderId);
+  await saveOrgSilent();
+  return ORG.gdrive.attachmentsFolderId;
+}
+async function driveUploadAttachmentFile(f){
+  const folderId = await driveEnsureAttachmentsFolder();
+  const blob = dataURLtoBlob(f.data);
+  const metadata = { name: f.name, parents:[folderId] };
+  const boundary = 'valles_att_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+  const metaPart = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n`;
+  const mediaHeader = `--${boundary}\r\nContent-Type: ${f.type||'application/octet-stream'}\r\n\r\n`;
+  const closeDelim = `\r\n--${boundary}--`;
+  const body = new Blob([metaPart, mediaHeader, blob, closeDelim]);
+  const res = await driveFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
+    method:'POST', headers:{'Content-Type':`multipart/related; boundary=${boundary}`}, body
+  });
+  const result = await res.json();
+  return { driveFileId: result.id, name:f.name, type:f.type, size:f.size };
+}
+async function driveFetchAttachmentFile(driveFileId){
+  const res = await driveFetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}?alt=media`);
+  return await res.blob();
+}
 /* Finds the existing live data.json by name within the Drive folder if this device doesn't
    already have its ID cached — same fix already applied to the Sheet lookup, applied here
    too. Without this, every fresh device that connects would create its OWN separate
@@ -2559,7 +2611,7 @@ function openDocForm(docId){
   dropZone.ondrop = async (e)=>{ e.preventDefault(); await handleDocFiles(e.dataTransfer.files); };
   fileInput.onchange = async ()=> handleDocFiles(fileInput.files);
   async function handleDocFiles(fileList){
-    for(const f of fileList){ try{ pendingDocFiles.push(await readFileAsDataURL(f)); }catch(err){ toast('Could not read file: '+f.name, true); } }
+    for(const f of fileList){ try{ pendingDocFiles.push(await processAttachmentUpload(f)); }catch(err){ toast('Could not read file: '+f.name, true); } }
     drawDocChips();
   }
   function drawDocChips(){
@@ -3924,7 +3976,7 @@ function openExpenseForm(expId){
   tallyFileInput.onchange = async ()=> handleTallyFile(tallyFileInput.files[0]);
   async function handleTallyFile(f){
     if(!f) return;
-    try{ pendingTallyFile = await readFileAsDataURL(f); drawTallyChip(); }catch(err){ toast('Could not read file: '+f.name, true); }
+    try{ pendingTallyFile = await processAttachmentUpload(f); drawTallyChip(); }catch(err){ toast('Could not read file: '+f.name, true); }
   }
   function drawTallyChip(){
     document.getElementById('tallyFileChip').innerHTML = pendingTallyFile ? `<div class="file-chip"><span class="fname">${esc(pendingTallyFile.name)} (${Math.round(pendingTallyFile.size/1024)} KB)</span><button type="button" class="btn secondary sm" id="tallyViewBtn">View</button><button type="button" id="rmTallyFile">✕</button></div>` : '';
@@ -3941,7 +3993,7 @@ function openExpenseForm(expId){
   billDropZone.ondrop = async (ev)=>{ ev.preventDefault(); await handleBillFiles(ev.dataTransfer.files); };
   billFileInput.onchange = async ()=> handleBillFiles(billFileInput.files);
   async function handleBillFiles(fileList){
-    for(const f of fileList){ try{ pendingBillFiles.push(await readFileAsDataURL(f)); }catch(err){ toast('Could not read file: '+f.name, true); } }
+    for(const f of fileList){ try{ pendingBillFiles.push(await processAttachmentUpload(f)); }catch(err){ toast('Could not read file: '+f.name, true); } }
     drawBillChips();
   }
   function drawBillChips(){
@@ -3957,7 +4009,7 @@ function openExpenseForm(expId){
   receiptDropZone.ondrop = async (ev)=>{ ev.preventDefault(); await handleReceiptFiles(ev.dataTransfer.files); };
   receiptFileInput.onchange = async ()=> handleReceiptFiles(receiptFileInput.files);
   async function handleReceiptFiles(fileList){
-    for(const f of fileList){ try{ pendingReceiptFiles.push(await readFileAsDataURL(f)); }catch(err){ toast('Could not read file: '+f.name, true); } }
+    for(const f of fileList){ try{ pendingReceiptFiles.push(await processAttachmentUpload(f)); }catch(err){ toast('Could not read file: '+f.name, true); } }
     drawReceiptChips();
   }
   function drawReceiptChips(){
@@ -4283,6 +4335,8 @@ function renderSettings(c, actions){
       <h2>Storage Usage</h2>
       <p style="color:var(--muted);font-size:13px;">Everything below lives in this browser's local storage, which most browsers cap around 5–10MB total. If saves start failing ("browser storage may be full"), this is where to find what to remove — usually large scanned bill/document images.</p>
       <div id="storageUsageWrap"></div>
+      <div class="btn-row" style="margin-top:10px;"><button class="btn" id="migrateAttachmentsBtn">☁ Migrate Attachments to Google Drive</button></div>
+      <p class="hint" style="margin-top:6px;">Moves existing attachments out of local storage into your Google Drive folder, replacing each with a small reference — frees up the space shown above. Requires Google Drive to be connected.</p>
     </div>
 
     <div class="card">
@@ -4345,14 +4399,14 @@ function renderSettings(c, actions){
     // largest ones can be found and removed directly instead of guessing.
     const items = [];
     EXPENSES.forEach(e=>{
-      (e.billAttachments||e.attachments||[]).forEach(f=> items.push({label:`Bill: ${e.voucherNo||'(unsaved)'} — ${f.name}`, size:f.size||0, area:'Bills & Expenses'}));
-      (e.receiptAttachments||[]).forEach(f=> items.push({label:`Receipt: ${e.voucherNo||'(unsaved)'} — ${f.name}`, size:f.size||0, area:'Bills & Expenses'}));
-      if(e.tallyAttachment) items.push({label:`Tally voucher: ${e.voucherNo||'(unsaved)'} — ${e.tallyAttachment.name}`, size:e.tallyAttachment.size||0, area:'Bills & Expenses'});
+      (e.billAttachments||e.attachments||[]).forEach(f=> items.push({label:`Bill: ${e.voucherNo||'(unsaved)'} — ${f.name}`, size:f.size||0, area:'Bills & Expenses', onDrive:!!f.driveFileId}));
+      (e.receiptAttachments||[]).forEach(f=> items.push({label:`Receipt: ${e.voucherNo||'(unsaved)'} — ${f.name}`, size:f.size||0, area:'Bills & Expenses', onDrive:!!f.driveFileId}));
+      if(e.tallyAttachment) items.push({label:`Tally voucher: ${e.voucherNo||'(unsaved)'} — ${e.tallyAttachment.name}`, size:e.tallyAttachment.size||0, area:'Bills & Expenses', onDrive:!!e.tallyAttachment.driveFileId});
     });
-    COMPANY_DOCS.forEach(d=> (d.attachments||[]).forEach(f=> items.push({label:`Document: ${d.docName} — ${f.name}`, size:f.size||0, area:'Documents'})));
+    COMPANY_DOCS.forEach(d=> (d.attachments||[]).forEach(f=> items.push({label:`Document: ${d.docName} — ${f.name}`, size:f.size||0, area:'Documents', onDrive:!!f.driveFileId})));
     Object.entries(COMPLIANCE).forEach(([empId,recs])=>{
       const emp = EMPLOYEES.find(x=>x.id===empId);
-      (recs||[]).forEach(r=> (r.files||[]).forEach(f=> items.push({label:`Compliance (${emp?emp.name:empId}): ${f.name}`, size:f.size||0, area:'Compliance'})));
+      (recs||[]).forEach(r=> (r.files||[]).forEach(f=> items.push({label:`Compliance (${emp?emp.name:empId}): ${f.name}`, size:f.size||0, area:'Compliance', onDrive:!!f.driveFileId})));
     });
     const byArea = {};
     items.forEach(i=>{ byArea[i.area] = (byArea[i.area]||0) + i.size; });
@@ -4365,11 +4419,40 @@ function renderSettings(c, actions){
       </div>
       ${Object.keys(byArea).length ? `<div class="section-label" style="margin-top:10px;">By Area</div><div class="grid cols-3">${Object.entries(byArea).map(([area,sz])=>`<div><label>${esc(area)}</label><div>${(sz/1024/1024).toFixed(2)} MB</div></div>`).join('')}</div>` : ''}
       ${top10.length ? `<div class="section-label" style="margin-top:10px;">Largest Individual Attachments</div>
-      <table><thead><tr><th>File</th><th>Area</th><th class="num-cell">Size</th></tr></thead><tbody>
-        ${top10.map(i=>`<tr><td>${esc(i.label)}</td><td>${esc(i.area)}</td><td class="num-cell">${(i.size/1024).toFixed(0)} KB</td></tr>`).join('')}
+      <table><thead><tr><th>File</th><th>Area</th><th>Status</th><th class="num-cell">Size</th></tr></thead><tbody>
+        ${top10.map(i=>`<tr><td>${esc(i.label)}</td><td>${esc(i.area)}</td><td>${i.onDrive?'<span class="pill good">☁ On Drive</span>':'<span class="pill neutral">💾 Local only</span>'}</td><td class="num-cell">${(i.size/1024).toFixed(0)} KB</td></tr>`).join('')}
       </tbody></table>` : '<div class="hint" style="margin-top:8px;">No attachments recorded yet.</div>'}
     `;
   })();
+  const migrateBtn = document.getElementById('migrateAttachmentsBtn');
+  if(migrateBtn) migrateBtn.onclick = async ()=>{
+    if(!driveConnected() || !ORG.gdrive || !ORG.gdrive.connected){ toast('Connect Google Drive first (below) before migrating attachments.', true); return; }
+    migrateBtn.disabled = true;
+    // Collect every attachment that's still stored inline (has .data, no .driveFileId yet)
+    // across every module, so it can be uploaded and replaced with a lightweight reference.
+    const jobs = [];
+    EXPENSES.forEach(e=>{
+      (e.billAttachments||e.attachments||[]).forEach((f,i)=>{ if(f.data && !f.driveFileId) jobs.push({f, apply:(uploaded)=>{ const arr=(e.billAttachments||e.attachments); arr[i]=uploaded; }}); });
+      (e.receiptAttachments||[]).forEach((f,i)=>{ if(f.data && !f.driveFileId) jobs.push({f, apply:(uploaded)=>{ e.receiptAttachments[i]=uploaded; }}); });
+      if(e.tallyAttachment && e.tallyAttachment.data && !e.tallyAttachment.driveFileId) jobs.push({f:e.tallyAttachment, apply:(uploaded)=>{ e.tallyAttachment=uploaded; }});
+    });
+    COMPANY_DOCS.forEach(d=> (d.attachments||[]).forEach((f,i)=>{ if(f.data && !f.driveFileId) jobs.push({f, apply:(uploaded)=>{ d.attachments[i]=uploaded; }}); }));
+    const complianceTouched = new Set();
+    Object.entries(COMPLIANCE).forEach(([empId,recs])=> (recs||[]).forEach(r=> (r.files||[]).forEach((f,i)=>{ if(f.data && !f.driveFileId) jobs.push({f, apply:(uploaded)=>{ r.files[i]=uploaded; complianceTouched.add(empId); }}); })));
+
+    if(!jobs.length){ toast('Nothing to migrate — no inline attachments found.'); migrateBtn.disabled=false; return; }
+    let done = 0, failed = 0;
+    for(const job of jobs){
+      migrateBtn.textContent = `Migrating ${done+1} of ${jobs.length}…`;
+      try{ const uploaded = await driveUploadAttachmentFile(job.f); job.apply(uploaded); done++; }
+      catch(e){ failed++; }
+    }
+    await saveExpenses(); await saveCompanyDocs();
+    for(const empId of complianceTouched){ await saveCompliance(empId); }
+    migrateBtn.disabled = false; migrateBtn.textContent = '☁ Migrate Attachments to Google Drive';
+    toast(`Migrated ${done} attachment(s) to Drive${failed?`, ${failed} failed`:''}.`, failed>0);
+    renderSettings(c, actions);
+  };
   const saveTxnBtn = document.getElementById('saveTxnSettings');
   if(saveTxnBtn) saveTxnBtn.onclick = async ()=>{
     ORG.allowFinalisedTxnEdit = document.getElementById('allowTxnEditChk').checked;
