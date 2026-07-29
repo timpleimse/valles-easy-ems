@@ -3655,7 +3655,7 @@ function renderExpenses(c, actions){
     list = list.slice().sort((a,b)=> (b.billDate||'').localeCompare(a.billDate||''));
     const wrap = document.getElementById('expTableWrap');
     if(!list.length){ wrap.innerHTML = '<div class="empty"><div class="icon">🧾</div>No bills recorded yet.<div class="cta"><button class="btn" id="emptyNewExp">+ New Bill / Expense</button></div></div>'; document.getElementById('emptyNewExp').onclick=()=>openExpenseForm(); return; }
-    wrap.innerHTML = `<table><thead><tr><th>Bill Log Ref</th><th>Date</th><th>Party</th><th>Description</th><th>TDS</th><th class="num-cell">Net Payable</th><th>Status</th><th>Tally</th><th>Docs</th><th></th></tr></thead><tbody>
+    wrap.innerHTML = `<table><thead><tr><th>Bill Log Ref</th><th>Date</th><th>Party</th><th>Description</th><th class="num-cell">Bill Amount</th><th>TDS</th><th class="num-cell">Net Payable</th><th>Status</th><th>Tally</th><th>Docs</th><th></th></tr></thead><tbody>
       ${list.map(e=>{ const tot = calcExpenseTotals(e);
         const hasBill = (e.billAttachments||e.attachments||[]).length>0;
         const hasReceipt = (e.receiptAttachments||[]).length>0;
@@ -3665,6 +3665,7 @@ function renderExpenses(c, actions){
         <td>${esc(e.billDate||'—')}</td>
         <td>${esc(expPartyLabel(e))}</td>
         <td style="max-width:220px;white-space:normal;">${esc(e.description||'—')}</td>
+        <td class="num-cell">${e.currency&&e.currency!=='INR'?`${CURRENCY_SYMBOLS[e.currency]||''}${moneyPlain2(tot.amt)}`:money2(tot.amtINR)}</td>
         <td>${e.tdsApplicable?`<span class="pill accent">${esc((TDS_SECTION_BY_ID[e.tdsSectionId]||{}).oldCode||'')} ${e.tdsRate}%</span>`:'—'}</td>
         <td class="num-cell">${money(tot.netPayable)}</td>
         <td>${expStatusPill(tot.payStatus)}</td>
