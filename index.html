@@ -1600,7 +1600,7 @@ function renderCompliance(c, actions){
   loadAllCompliance().then(draw);
   document.getElementById('filterType').addEventListener('change', draw);
   document.getElementById('filterEmp').addEventListener('change', draw);
-  async function loadAllCompliance(){ for(const e of EMPLOYEES){ await loadCompliance(e.id); } updateCompBadge(); }
+  async function loadAllCompliance(){ await Promise.all(EMPLOYEES.map(e=> loadCompliance(e.id))); updateCompBadge(); }
   function draw(){
     const typeF = document.getElementById('filterType').value, empF = document.getElementById('filterEmp').value;
     let rows = [];
@@ -1932,6 +1932,32 @@ async function driveEnsureDataFile(){
   }catch(e){}
   return ORG.gdrive.fileId;
 }
+/* Pulls whatever's currently in Drive and merges it into local state using the same safe,
+   non-destructive merge every save already uses (never blindly overwrites — newer wins per
+   record, deletions apply via tombstones). Runs on every routine reconnect (every app open),
+   so changes made on other devices actually show up here by default, not just when this
+   device happens to save something itself. */
+function pullLatestFromDriveIntoLocal(remote){
+  if(!remote) return;
+  EMPLOYEES = mergeCollection('employees', EMPLOYEES, remote.employees, remote.tombstones && remote.tombstones.employees);
+  PAYSLIPS = mergeCollection('payslips', PAYSLIPS, remote.payslips, remote.tombstones && remote.tombstones.payslips);
+  PARTIES = mergeCollection('parties', PARTIES, remote.parties, remote.tombstones && remote.tombstones.parties);
+  COMPANY_DOCS = mergeCollection('documents', COMPANY_DOCS, remote.documents, remote.tombstones && remote.tombstones.documents);
+  TRANSACTIONS = mergeCollection('transactions', TRANSACTIONS, remote.transactions, remote.tombstones && remote.tombstones.transactions);
+  EXPENSES = mergeCollection('expenses', EXPENSES, remote.expenses, remote.tombstones && remote.tombstones.expenses);
+  if(remote.compliance){
+    Object.keys(remote.compliance).forEach(empId=>{
+      const tombKind = 'compliance:'+empId;
+      const remoteTomb = remote.tombstones ? remote.tombstones[tombKind] : null;
+      COMPLIANCE[empId] = mergeCollection(tombKind, COMPLIANCE[empId]||[], remote.compliance[empId], remoteTomb);
+    });
+  }
+  ensureLocal();
+  LOCAL.employees = EMPLOYEES; LOCAL.payslips = PAYSLIPS; LOCAL.parties = PARTIES;
+  LOCAL.documents = COMPANY_DOCS; LOCAL.transactions = TRANSACTIONS; LOCAL.expenses = EXPENSES; LOCAL.compliance = COMPLIANCE;
+  try{ localStorage.setItem(LS_KEY, JSON.stringify(LOCAL)); }catch(e){}
+  if(activeTab && document.getElementById('content')) render(); // reflect anything that changed
+}
 function totalRecordCount(payload){
   return (payload.employees||[]).length + (payload.payslips||[]).length + (payload.parties||[]).length +
     (payload.documents||[]).length + (payload.transactions||[]).length + (payload.expenses||[]).length;
@@ -1954,6 +1980,7 @@ async function applyRestoredPayload(data){
    device's state (which, for a fresh device, is empty, and would previously have created a
    confusing duplicate data.json instead of finding the real one). */
 async function driveReconcileOnConnect(){
+  const alreadyKnownDevice = !!ORG.gdrive.fileId; // this device has connected before and already knows its data file
   if(!ORG.gdrive.folderId) await driveSetup();
   await driveEnsureDataFile();
   if(!ORG.gdrive.fileId) return false; // nothing in Drive yet — genuinely first-ever setup, push local as-is
@@ -1963,6 +1990,16 @@ async function driveReconcileOnConnect(){
     if(res.ok) remote = await res.json();
   }catch(e){}
   if(!remote) return false;
+  if(alreadyKnownDevice){
+    // Routine reconnect — this happens on every single app open/refresh, not just once, since
+    // it shares the same callback as a fresh connect. Asking "which data wins" here (as this
+    // function used to, unconditionally) meant that choice modal was popping up on every
+    // normal reopen once a device had real data — not a genuine ambiguity, just noise. A
+    // known device's local and remote data are the same lineage; merge them quietly the same
+    // way every other save on this device already does, and load Drive's latest by default.
+    pullLatestFromDriveIntoLocal(remote);
+    return false;
+  }
   const localCount = totalRecordCount({ employees:EMPLOYEES, payslips:PAYSLIPS, parties:PARTIES, documents:COMPANY_DOCS, transactions:TRANSACTIONS, expenses:EXPENSES });
   const remoteCount = totalRecordCount(remote);
   if(localCount===0 && remoteCount>0){
@@ -3618,28 +3655,31 @@ function renderExpenses(c, actions){
     list = list.slice().sort((a,b)=> (b.billDate||'').localeCompare(a.billDate||''));
     const wrap = document.getElementById('expTableWrap');
     if(!list.length){ wrap.innerHTML = '<div class="empty"><div class="icon">🧾</div>No bills recorded yet.<div class="cta"><button class="btn" id="emptyNewExp">+ New Bill / Expense</button></div></div>'; document.getElementById('emptyNewExp').onclick=()=>openExpenseForm(); return; }
-    wrap.innerHTML = `<table><thead><tr><th>Voucher No.</th><th>Type</th><th>Party</th><th>Date</th><th>Category</th><th class="num-cell">Net Payable</th><th class="num-cell">Balance</th><th>TDS</th><th>Docs</th><th>Tally</th><th>Status</th><th></th></tr></thead><tbody>
+    wrap.innerHTML = `<table><thead><tr><th>Bill Log Ref</th><th>Date</th><th>Party</th><th>Description</th><th>TDS</th><th class="num-cell">Net Payable</th><th>Status</th><th>Tally</th><th>Docs</th><th></th></tr></thead><tbody>
       ${list.map(e=>{ const tot = calcExpenseTotals(e);
         const hasBill = (e.billAttachments||e.attachments||[]).length>0;
         const hasReceipt = (e.receiptAttachments||[]).length>0;
         const needsReceipt = tot.payStatus==='Paid' || tot.payStatus==='Partial';
         return `<tr>
         <td><b>${esc(e.voucherNo)}</b>${e.billNo?`<div style="color:var(--muted);font-size:11.5px;">${esc(e.billNo)}</div>`:''}${e.currency&&e.currency!=='INR'?` <span class="pill neutral">${esc(e.currency)}</span>`:''}${e.rcmApplicable?' <span class="pill warn">RCM</span>':''}</td>
-        <td><span class="pill neutral">${esc(BILL_TYPE_LABELS[e.billType]||'Supplier')}</span></td>
-        <td>${esc(expPartyLabel(e))}</td><td>${esc(e.billDate||'—')}</td><td>${esc(e.category||'—')}</td>
-        <td class="num-cell">${money(tot.netPayable)}</td><td class="num-cell">${tot.balance<0?`<span style="color:var(--good);">Overpaid ${money(Math.abs(tot.balance))}</span>`:money(tot.balance)}</td>
+        <td>${esc(e.billDate||'—')}</td>
+        <td>${esc(expPartyLabel(e))}</td>
+        <td style="max-width:220px;white-space:normal;">${esc(e.description||'—')}</td>
         <td>${e.tdsApplicable?`<span class="pill accent">${esc((TDS_SECTION_BY_ID[e.tdsSectionId]||{}).oldCode||'')} ${e.tdsRate}%</span>`:'—'}</td>
+        <td class="num-cell">${money(tot.netPayable)}</td>
+        <td>${expStatusPill(tot.payStatus)}</td>
+        <td>${e.tallyVoucherNo?`<span class="pill good" title="#${esc(e.tallyVoucherNo)}">✓ Posted</span>`:'<span class="pill bad">Pending</span>'}</td>
         <td>
           <span class="pill ${hasBill?'good':'bad'}" title="Bill copy — click to view" data-viewbill="${e.id}" style="cursor:pointer;">📄 ${hasBill?'✓':'✕'}</span>
           <span class="pill ${hasReceipt?'good':(needsReceipt?'bad':'neutral')}" title="Payment receipt — click to view" data-viewreceipt="${e.id}" style="cursor:pointer;">🧾 ${hasReceipt?'✓':'✕'}</span>
         </td>
-        <td>${e.tallyVoucherNo?`<span class="pill good" title="#${esc(e.tallyVoucherNo)}">✓ Posted</span>`:'<span class="pill bad">Pending</span>'}</td>
-        <td>${expStatusPill(tot.payStatus)}</td>
         <td class="no-print" style="white-space:nowrap;">
+          <button class="btn secondary sm" data-viewbillsummary="${e.id}">View</button>
           <button class="btn secondary sm" data-edit="${e.id}">Edit</button>
           <button class="btn danger sm" data-del="${e.id}">Delete</button>
         </td></tr>`; }).join('')}
     </tbody></table>`;
+    wrap.querySelectorAll('[data-viewbillsummary]').forEach(b=> b.onclick=()=> openExpenseViewSummary(b.dataset.viewbillsummary));
     wrap.querySelectorAll('[data-viewbill]').forEach(b=> b.onclick=()=> viewAttachmentGroup(b.dataset.viewbill, 'bill'));
     wrap.querySelectorAll('[data-viewreceipt]').forEach(b=> b.onclick=()=> viewAttachmentGroup(b.dataset.viewreceipt, 'receipt'));
     wrap.querySelectorAll('[data-edit]').forEach(b=> b.onclick=()=>openExpenseForm(b.dataset.edit));
@@ -4106,6 +4146,53 @@ function deleteExpense(id){
 }
 /* Clicking a Docs pill in the bill list opens the attachment(s) directly — one file opens
    straight in a new tab; several files open a small chooser so it's still one click away. */
+function openExpenseViewSummary(id){
+  const e = EXPENSES.find(x=>x.id===id); if(!e) return;
+  const tot = calcExpenseTotals(e);
+  const ledger = (ORG.chartOfAccounts||[]).find(a=>a.id===e.ledgerAccountId);
+  const sym = e.currency && e.currency!=='INR' ? (CURRENCY_SYMBOLS[e.currency]||'') : '';
+  const billFiles = e.billAttachments||e.attachments||[];
+  const receiptFiles = e.receiptAttachments||[];
+  openModal(`
+    <div class="modal-head"><h3>${esc(e.voucherNo)} <span class="pill neutral">${esc(BILL_TYPE_LABELS[e.billType]||'Supplier')}</span></h3><button class="modal-close" id="mClose">✕</button></div>
+    <div class="grid cols-3">
+      <div><label>Party</label><div><b>${esc(expPartyLabel(e))}</b></div></div>
+      <div><label>Bill Date</label><div>${esc(e.billDate||'—')}</div></div>
+      <div><label>Due Date</label><div>${esc(e.dueDate||'—')}</div></div>
+      <div><label>Category</label><div>${esc(e.category||'—')}</div></div>
+      <div><label>Bill No.</label><div>${esc(e.billNo||'—')}</div></div>
+      <div><label>Ledger Account</label><div>${ledger?esc(ledger.code+' · '+ledger.name):'—'}</div></div>
+    </div>
+    ${e.description?`<div style="margin-top:8px;"><label>Description</label><div>${esc(e.description)}</div></div>`:''}
+    <div class="divider"></div>
+    <div class="grid cols-4">
+      <div><label>Amount${sym?` (${esc(e.currency)})`:''}</label><div><b>${sym}${money2(tot.amtINR)}</b></div></div>
+      <div><label>GST${e.rcmApplicable?' (self-assessed)':''}</label><div>${money2(tot.gstTotal)}</div></div>
+      <div><label>TDS</label><div>${money2(tot.tdsAmount)}</div></div>
+      <div><label>Net Payable</label><div><b>${money2(tot.netPayable)}</b></div></div>
+    </div>
+    <div class="grid cols-3" style="margin-top:8px;">
+      <div><label>Paid So Far</label><div>${money2(e.paidAmount||0)}</div></div>
+      <div><label>Balance</label><div>${tot.balance<0?`<span style="color:var(--good);">Overpaid ${money2(Math.abs(tot.balance))}</span>`:money2(tot.balance)}</div></div>
+      <div><label>Status</label><div>${expStatusPill(tot.payStatus)}</div></div>
+    </div>
+    ${(e.paymentMode||e.paymentRef)?`<div class="grid cols-3" style="margin-top:8px;">
+      <div><label>Payment Mode</label><div>${esc(e.paymentMode||'—')}</div></div>
+      <div><label>Reference</label><div>${esc(e.paymentRef||'—')}</div></div>
+      <div><label>Date of Payment</label><div>${esc(e.paymentDate||'—')}</div></div>
+    </div>`:''}
+    <div class="divider"></div>
+    <div><label>Tally Voucher</label><div>${e.tallyVoucherNo?`<span class="pill good">✓ ${esc(e.tallyVoucherNo)}${e.tallyVoucherDate?' · '+esc(e.tallyVoucherDate):''}</span>`:'<span class="pill bad">Pending</span>'}</div></div>
+    <div class="grid cols-2" style="margin-top:10px;">
+      <div><label>📄 Bill Copy</label>${billFiles.length?billFiles.map(f=>attachmentChipHtml(f)).join(''):'<div class="hint">Not attached</div>'}</div>
+      <div><label>🧾 Payment Receipt</label>${receiptFiles.length?receiptFiles.map(f=>attachmentChipHtml(f)).join(''):'<div class="hint">Not attached</div>'}</div>
+    </div>
+    ${e.notes?`<div style="margin-top:10px;"><label>Notes</label><div>${esc(e.notes)}</div></div>`:''}
+    <div class="btn-row" style="margin-top:14px;"><button class="btn secondary" id="mCancel">Close</button></div>
+  `, true);
+  document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+  wireAttachmentButtons();
+}
 function viewAttachmentGroup(expId, group){
   const e = EXPENSES.find(x=>x.id===expId); if(!e) return;
   const files = group==='bill' ? (e.billAttachments||e.attachments||[]) : (e.receiptAttachments||[]);
@@ -4826,10 +4913,12 @@ async function viewDriveBackupDetail(fileId, label){
 /* ============================= INIT ============================= */
 (async function init(){
   await loadAll();
-  for(const e of EMPLOYEES){ await loadCompliance(e.id); }
-  updateCompBadge();
   updateDocBadge();
-  setTab('dashboard');
+  setTab('dashboard'); // paint immediately — don't block first render on compliance or Drive
+  Promise.all(EMPLOYEES.map(e=> loadCompliance(e.id))).then(()=>{
+    updateCompBadge();
+    if(activeTab==='staff') render(); // refresh the compliance badge if already viewing it
+  });
   if(ORG.gdrive && ORG.gdrive.connected){ attemptSilentDriveReconnect(); startAutoSyncLoop(); startPresenceLoop(); ensureStaffName(); }
 })();
 </script>
