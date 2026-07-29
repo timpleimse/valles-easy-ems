@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Valles EASY EMS</title>
+<title>Valles Management System</title>
 <style>
   :root{
     --bg:#F4F6FA;
@@ -215,7 +215,7 @@
       <div class="brand-logo" id="sbLogo">V</div>
       <div>
         <div class="brand-name" id="sbCompanyName">Valles India Tech Services</div>
-        <div class="brand-sub" id="sbProduct">Valles EASY EMS</div>
+        <div class="brand-sub" id="sbProduct">Valles Management System</div>
       </div>
     </div>
     <nav id="navList" style="display:flex;">
@@ -242,8 +242,8 @@
   </div>
   <div id="content"></div>
   <footer class="app-footer no-print">
-    <div>&copy; 2026 EASY EMS &ndash; Engineering Management System. All rights reserved.</div>
-    <div>Powered by IMSE Tech India</div>
+    <div>&copy; 2026 EASY MS &ndash; Management System. All rights reserved.</div>
+    <div>Powered by Valles India Tech Services Pvt.Ltd</div>
     <div>Version 1.0.0</div>
   </footer>
 </div>
@@ -316,7 +316,7 @@ async function setJSON(key, value){
 }
 function buildPayload(){
   ensureLocal();
-  return { app:'Valles EASY EMS', version:2, savedAt:new Date().toISOString(),
+  return { app:'Valles Management System', version:2, savedAt:new Date().toISOString(),
     org:ORG, employees:EMPLOYEES, payslips:PAYSLIPS, compliance:COMPLIANCE,
     parties:PARTIES, documents:COMPANY_DOCS, transactions:TRANSACTIONS, expenses:EXPENSES,
     presence:LOCAL.presence, tombstones:LOCAL.tombstones };
@@ -2234,7 +2234,7 @@ async function driveEnsureSheet(){
       }
     }catch(e){ if(ORG.gdrive.pinnedSheetId) throw e; sheetId = null; }
   }
-  const sheetTitle = (ORG.companyName||'Valles EASY EMS')+' — Live Data';
+  const sheetTitle = (ORG.companyName||'Valles Management System')+' — Live Data';
   if(!sheetId){
     /* This browser doesn't have a cached sheet ID — but another device may already have
        created the sheet. Search the shared Drive folder by name first (same pattern as the
@@ -4213,7 +4213,7 @@ function viewAttachmentGroup(expId, group){
 /* ============================= BACKUP & RESTORE ============================= */
 async function doExport(){
   for(const e of EMPLOYEES){ await loadCompliance(e.id); }
-  const payload = { exportedAt: new Date().toISOString(), app: 'Valles EASY EMS', version: 2, org: ORG, employees: EMPLOYEES, payslips: PAYSLIPS, compliance: COMPLIANCE, parties: PARTIES, documents: COMPANY_DOCS, transactions: TRANSACTIONS, expenses: EXPENSES };
+  const payload = { exportedAt: new Date().toISOString(), app: 'Valles Management System', version: 2, org: ORG, employees: EMPLOYEES, payslips: PAYSLIPS, compliance: COMPLIANCE, parties: PARTIES, documents: COMPANY_DOCS, transactions: TRANSACTIONS, expenses: EXPENSES };
   const blob = new Blob([JSON.stringify(payload,null,2)], {type:'application/json'});
   const url = URL.createObjectURL(blob); const a = document.createElement('a');
   a.href = url; a.download = `valles-easy-ems-backup-${new Date().toISOString().slice(0,10)}.json`;
