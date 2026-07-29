@@ -1,4 +1,4 @@
-# Valles EASY EMS — Complete Setup Guide
+# Valles EASY MS — Complete Setup Guide
 
 Single-file web app. No server, no database. It runs entirely in the browser
 and syncs its data to a folder in a Google Drive account you control.
